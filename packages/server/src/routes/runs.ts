@@ -1,0 +1,99 @@
+import { Hono } from 'hono';
+import { eq, desc, asc } from 'drizzle-orm';
+import { db } from '../lib/db';
+import { runs, orders, fills, portfolioSnapshots, agentEvents, checkpoints } from '@aegis/db/schema';
+import { runManager } from '../services/run-manager';
+
+export const runRoutes = new Hono();
+
+runRoutes.post('/', async (c) => {
+  const body = await c.req.json();
+  const run = await runManager.startBacktest(body.agentId, {
+    symbols: body.symbols,
+    startDate: body.startDate,
+    endDate: body.endDate,
+    timeframe: body.timeframe || '1Day',
+    initialCapital: body.initialCapital || 100000,
+    slippageBps: body.slippageBps || 5,
+    feePerShare: body.feePerShare || 0.01,
+    feePercentage: body.feePercentage || 0,
+    seed: body.seed || 42,
+    checkpointInterval: body.checkpointInterval || 50,
+  });
+  return c.json({ data: run }, 201);
+});
+
+runRoutes.get('/:id', async (c) => {
+  const id = c.req.param('id');
+  const run = await db.query.runs.findFirst({ where: eq(runs.id, id) });
+  if (!run) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
+  return c.json({ data: run });
+});
+
+runRoutes.get('/:id/events', async (c) => {
+  const id = c.req.param('id');
+  const offset = parseInt(c.req.query('offset') || '0');
+  const limit = parseInt(c.req.query('limit') || '50');
+
+  const events = await db.query.agentEvents.findMany({
+    where: eq(agentEvents.runId, id),
+    orderBy: [asc(agentEvents.createdAt)],
+    offset,
+    limit,
+  });
+  return c.json({ data: events });
+});
+
+runRoutes.get('/:id/orders', async (c) => {
+  const id = c.req.param('id');
+  const orderList = await db.query.orders.findMany({
+    where: eq(orders.runId, id),
+  });
+  return c.json({ data: orderList });
+});
+
+runRoutes.get('/:id/portfolio', async (c) => {
+  const id = c.req.param('id');
+  const snapshots = await db.query.portfolioSnapshots.findMany({
+    where: eq(portfolioSnapshots.runId, id),
+    orderBy: [portfolioSnapshots.barIndex],
+  });
+  return c.json({ data: snapshots });
+});
+
+runRoutes.get('/:id/checkpoints', async (c) => {
+  const id = c.req.param('id');
+  const cps = await db.query.checkpoints.findMany({
+    where: eq(checkpoints.runId, id),
+    orderBy: [checkpoints.barIndex],
+  });
+  return c.json({ data: cps });
+});
+
+runRoutes.post('/:id/pause', async (c) => {
+  const id = c.req.param('id');
+  await runManager.pauseRun(id);
+  return c.json({ data: { status: 'paused' } });
+});
+
+runRoutes.post('/:id/resume', async (c) => {
+  const id = c.req.param('id');
+  await runManager.resumeRun(id);
+  return c.json({ data: { status: 'running' } });
+});
+
+runRoutes.post('/:id/cancel', async (c) => {
+  const id = c.req.param('id');
+  await runManager.cancelRun(id);
+  return c.json({ data: { status: 'cancelled' } });
+});
+
+runRoutes.post('/:id/generate-soul', async (c) => {
+  const id = c.req.param('id');
+  const run = await db.query.runs.findFirst({ where: eq(runs.id, id) });
+  if (!run) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
+
+  const { pythonClient } = await import('../lib/python-client');
+  await pythonClient.generateSoul({ runId: id, agentId: run.agentId });
+  return c.json({ data: { status: 'generating' } });
+});

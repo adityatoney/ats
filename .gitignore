@@ -2,3 +2,23 @@ ideations/
 .DS_Store
 env.local
 .env
+
+# Node
+node_modules/
+dist/
+.turbo/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ruff_cache/
+*.egg-info/
+
+# Data
+*.parquet
+
+# IDE
+.idea/
+.vscode/
+*.swp

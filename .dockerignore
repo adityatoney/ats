@@ -1,0 +1,14 @@
+node_modules
+dist
+.turbo
+.git
+.env
+*.parquet
+data/
+__pycache__
+.venv
+.ruff_cache
+*.egg-info
+.DS_Store
+docs/
+ideations/

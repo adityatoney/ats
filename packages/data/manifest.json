@@ -1,0 +1,32 @@
+{
+  "datasets": {
+    "AAPL/1Day_2023-06-01_2024-01-01": {
+      "path": "AAPL/1Day_2023-06-01_2024-01-01.parquet",
+      "symbol": "AAPL",
+      "timeframe": "1Day",
+      "start": "2023-06-01",
+      "end": "2024-01-01"
+    },
+    "AAPL/1Day_2022-01-01_2023-01-01": {
+      "path": "AAPL/1Day_2022-01-01_2023-01-01.parquet",
+      "symbol": "AAPL",
+      "timeframe": "1Day",
+      "start": "2022-01-01",
+      "end": "2023-01-01"
+    },
+    "AAPL/1Day_2023-01-01_2026-01-01": {
+      "path": "AAPL/1Day_2023-01-01_2026-01-01.parquet",
+      "symbol": "AAPL",
+      "timeframe": "1Day",
+      "start": "2023-01-01",
+      "end": "2026-01-01"
+    },
+    "AAPL/1Day_2023-06-01_2023-08-01": {
+      "path": "AAPL/1Day_2023-06-01_2023-08-01.parquet",
+      "symbol": "AAPL",
+      "timeframe": "1Day",
+      "start": "2023-06-01",
+      "end": "2023-08-01"
+    }
+  }
+}

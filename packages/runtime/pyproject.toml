@@ -1,0 +1,44 @@
+[project]
+name = "aegis-runtime"
+version = "0.1.0"
+description = "AegisTrader Python simulation runtime"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "polars>=1.24.0",
+    "alpaca-py>=0.36.0",
+    "anthropic>=0.52.0",
+    "psycopg[binary]>=3.2.0",
+    "pydantic>=2.11.0",
+    "httpx>=0.28.0",
+    "pyarrow>=19.0.0",
+    "pytz>=2026.1.post1",
+    "yfinance>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "ruff>=0.11.0",
+    "respx>=0.22.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aegis_runtime"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

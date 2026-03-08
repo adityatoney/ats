@@ -1,0 +1,97 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: aegis-postgres
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: aegis_dev
+      POSTGRES_DB: aegis_trader
+    ports:
+      - "5432:5432"
+    volumes:
+      - aegis_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis_trader"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Run migrations + seed before starting app services
+  migrate:
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    container_name: aegis-migrate
+    environment:
+      DATABASE_URL: postgresql://aegis:aegis_dev@postgres:5432/aegis_trader
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "
+        cd packages/db &&
+        npx drizzle-kit migrate &&
+        npx tsx src/seed.ts &&
+        echo 'Migrations and seed complete'
+      "
+
+  server:
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    container_name: aegis-server
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgresql://aegis:aegis_dev@postgres:5432/aegis_trader
+      PORT: "3001"
+      PYTHON_RUNTIME_URL: http://runtime:8000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  runtime:
+    build:
+      context: .
+      dockerfile: packages/runtime/Dockerfile
+    container_name: aegis-runtime
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://aegis:aegis_dev@postgres:5432/aegis_trader
+      NODE_SERVER_URL: http://server:3001
+      ALPACA_API_KEY: ${ALPACA_API_KEY}
+      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - aegis_data:/app/data
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+    container_name: aegis-web
+    ports:
+      - "5173:5173"
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  aegis_pgdata:
+  aegis_data:

@@ -1,0 +1,28 @@
+{
+  "name": "aegis-trader",
+  "private": true,
+  "packageManager": "pnpm@10.31.0",
+  "scripts": {
+    "dev:server": "pnpm --filter @aegis/server dev",
+    "dev:web": "pnpm --filter @aegis/web dev",
+    "dev:runtime": "cd packages/runtime && uv run uvicorn aegis_runtime.api.app:app --reload --port 8000",
+    "lint": "turbo lint",
+    "lint:py": "cd packages/runtime && uv run ruff check src/ tests/",
+    "format:py": "cd packages/runtime && uv run ruff format src/ tests/",
+    "test": "turbo test",
+    "test:py": "cd packages/runtime && uv run pytest tests/ -v",
+    "docker:up": "docker compose up -d",
+    "docker:up:build": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "db:generate": "pnpm --filter @aegis/db generate",
+    "db:migrate": "pnpm --filter @aegis/db migrate",
+    "db:seed": "pnpm --filter @aegis/db seed",
+    "build": "turbo build"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0",
+    "typescript": "^5.8.0",
+    "prettier": "^3.5.0"
+  }
+}
