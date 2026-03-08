@@ -1,0 +1,1255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project AegisTrader: Growing Trading Personalities</title>
+<style>
+  :root {
+    --bg-primary: #0a0e1a;
+    --bg-secondary: #111827;
+    --bg-card: #1a2235;
+    --bg-card-hover: #1e2a42;
+    --text-primary: #f0f4fc;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent-soul: #3b82f6;
+    --accent-soul-dim: rgba(59, 130, 246, 0.15);
+    --accent-counter: #a855f7;
+    --accent-counter-dim: rgba(168, 85, 247, 0.15);
+    --accent-coach: #10b981;
+    --accent-coach-dim: rgba(16, 185, 129, 0.15);
+    --accent-warn: #f59e0b;
+    --border: #1e293b;
+    --border-light: #334155;
+    --radius: 12px;
+    --radius-sm: 8px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; font-size: 16px; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    overflow-x: hidden;
+  }
+
+  /* --- NAV --- */
+  nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    background: rgba(10, 14, 26, 0.85);
+    border-bottom: 1px solid var(--border);
+    padding: 0 2rem;
+    transition: background 0.3s;
+  }
+  nav.scrolled { background: rgba(10, 14, 26, 0.97); }
+  .nav-inner {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 56px;
+  }
+  .nav-brand {
+    font-weight: 700;
+    font-size: 0.95rem;
+    color: var(--accent-soul);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .nav-links {
+    display: flex;
+    gap: 0.25rem;
+    list-style: none;
+    flex-wrap: wrap;
+  }
+  .nav-links a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.8rem;
+    padding: 0.35rem 0.65rem;
+    border-radius: var(--radius-sm);
+    transition: color 0.2s, background 0.2s;
+  }
+  .nav-links a:hover, .nav-links a.active {
+    color: var(--text-primary);
+    background: var(--bg-card);
+  }
+  .nav-toggle {
+    display: none;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.5rem;
+    cursor: pointer;
+  }
+
+  /* --- LAYOUT --- */
+  .container { max-width: 1100px; margin: 0 auto; padding: 0 2rem; }
+  section { padding: 5rem 0; }
+  section + section { border-top: 1px solid var(--border); }
+
+  h1 { font-size: clamp(2rem, 5vw, 3.2rem); font-weight: 800; line-height: 1.15; letter-spacing: -0.02em; }
+  h2 { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 700; margin-bottom: 1.5rem; letter-spacing: -0.01em; }
+  h3 { font-size: 1.15rem; font-weight: 600; margin-bottom: 0.75rem; }
+  h4 { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.5rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+
+  p { color: var(--text-secondary); margin-bottom: 1rem; }
+  p.lead { font-size: 1.15rem; color: var(--text-primary); line-height: 1.8; }
+  strong { color: var(--text-primary); }
+
+  /* --- HERO --- */
+  .hero {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding-top: 80px;
+    padding-bottom: 4rem;
+    border-bottom: none;
+  }
+  .hero-label {
+    display: inline-block;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--accent-soul);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 1.5rem;
+    padding: 0.35rem 0.85rem;
+    background: var(--accent-soul-dim);
+    border-radius: 99px;
+  }
+  .hero h1 { margin-bottom: 1.5rem; }
+  .hero .thesis {
+    font-size: clamp(1.05rem, 2vw, 1.3rem);
+    color: var(--text-secondary);
+    max-width: 740px;
+    line-height: 1.8;
+    margin-bottom: 2.5rem;
+  }
+  .principle-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-left: 4px solid var(--accent-soul);
+    border-radius: var(--radius-sm);
+    padding: 1.25rem 1.75rem;
+    max-width: 600px;
+  }
+  .principle-box .label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: 0.4rem;
+  }
+  .principle-box .value {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-style: italic;
+  }
+
+  /* --- CARDS --- */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2rem;
+    margin-bottom: 1.5rem;
+    transition: border-color 0.25s, background 0.25s;
+  }
+  .card:hover { border-color: var(--border-light); background: var(--bg-card-hover); }
+  .card.soul { border-left: 4px solid var(--accent-soul); }
+  .card.counter { border-left: 4px solid var(--accent-counter); }
+  .card.coach { border-left: 4px solid var(--accent-coach); }
+
+  .badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0.25rem 0.6rem;
+    border-radius: 4px;
+    margin-bottom: 0.75rem;
+  }
+  .badge.soul { background: var(--accent-soul-dim); color: var(--accent-soul); }
+  .badge.counter { background: var(--accent-counter-dim); color: var(--accent-counter); }
+  .badge.coach { background: var(--accent-coach-dim); color: var(--accent-coach); }
+  .badge.mvp { background: rgba(245, 158, 11, 0.15); color: var(--accent-warn); }
+
+  /* --- PRODUCT LOOP --- */
+  .loop-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin: 3rem 0;
+    flex-wrap: wrap;
+  }
+  .loop-step {
+    text-align: center;
+    padding: 2rem 1.5rem;
+    flex: 0 0 200px;
+    position: relative;
+  }
+  .loop-icon {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.8rem;
+    margin: 0 auto 1rem;
+    border: 2px solid;
+  }
+  .loop-icon.soul { background: var(--accent-soul-dim); border-color: var(--accent-soul); color: var(--accent-soul); }
+  .loop-icon.counter { background: var(--accent-counter-dim); border-color: var(--accent-counter); color: var(--accent-counter); }
+  .loop-icon.coach { background: var(--accent-coach-dim); border-color: var(--accent-coach); color: var(--accent-coach); }
+  .loop-step h3 { font-size: 1.1rem; margin-bottom: 0.4rem; }
+  .loop-step p { font-size: 0.85rem; color: var(--text-muted); margin: 0; }
+  .loop-arrow {
+    font-size: 1.5rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    padding: 0 0.5rem;
+  }
+
+  /* --- FLOW --- */
+  .flow {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 2rem 0;
+    position: relative;
+    padding-left: 2rem;
+  }
+  .flow::before {
+    content: '';
+    position: absolute;
+    left: 11px;
+    top: 12px;
+    bottom: 12px;
+    width: 2px;
+    background: var(--border-light);
+  }
+  .flow-step {
+    position: relative;
+    padding: 0.75rem 0 0.75rem 1.5rem;
+  }
+  .flow-step::before {
+    content: '';
+    position: absolute;
+    left: -2rem;
+    top: 1.15rem;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 2px solid var(--accent-soul);
+    background: var(--bg-primary);
+    z-index: 1;
+  }
+  .flow-step .time {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 0.25rem;
+  }
+  .flow-step h3 { margin-bottom: 0.25rem; font-size: 1rem; }
+  .flow-step p { font-size: 0.9rem; margin: 0; }
+
+  /* --- GRID --- */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.5rem; }
+
+  /* --- TABLE --- */
+  .table-wrap { overflow-x: auto; margin: 1.5rem 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  td { color: var(--text-secondary); }
+
+  /* --- EXPANDABLE --- */
+  details {
+    margin: 0.75rem 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  summary {
+    padding: 1rem 1.25rem;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.95rem;
+    background: var(--bg-card);
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: background 0.2s;
+  }
+  summary:hover { background: var(--bg-card-hover); }
+  summary::before {
+    content: '+';
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    line-height: 18px;
+    text-align: center;
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    transition: transform 0.2s;
+  }
+  details[open] summary::before { content: '\2212'; }
+  .details-body { padding: 1.25rem; }
+  .details-body p { font-size: 0.9rem; }
+  .details-body ul { padding-left: 1.25rem; color: var(--text-secondary); font-size: 0.9rem; }
+  .details-body li { margin-bottom: 0.4rem; }
+
+  /* --- COMPARISON SCREEN MOCK --- */
+  .comparison-mock {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    padding: 2rem;
+    margin: 2rem 0;
+  }
+  .comparison-header {
+    text-align: center;
+    margin-bottom: 2rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .comparison-columns {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 1.5rem;
+    align-items: start;
+  }
+  .comparison-col {
+    background: var(--bg-card);
+    border-radius: var(--radius-sm);
+    padding: 1.5rem;
+    border: 1px solid var(--border);
+  }
+  .comparison-col.bull { border-top: 3px solid var(--accent-soul); }
+  .comparison-col.bear { border-top: 3px solid var(--accent-counter); }
+  .comparison-divider {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    padding-top: 2rem;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+  }
+  .vs-badge {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--bg-primary);
+    border: 2px solid var(--border-light);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+  .belief-item {
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.85rem;
+  }
+  .belief-item:last-child { border-bottom: none; }
+  .belief-label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.3rem;
+  }
+  .belief-value { color: var(--text-secondary); }
+  .coach-actions {
+    text-align: center;
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+  }
+  .btn-mock {
+    display: inline-block;
+    padding: 0.5rem 1.25rem;
+    border-radius: var(--radius-sm);
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin: 0 0.35rem;
+    border: 1px solid;
+  }
+  .btn-mock.soul { background: var(--accent-soul-dim); border-color: var(--accent-soul); color: var(--accent-soul); }
+  .btn-mock.counter { background: var(--accent-counter-dim); border-color: var(--accent-counter); color: var(--accent-counter); }
+  .btn-mock.coach { background: var(--accent-coach-dim); border-color: var(--accent-coach); color: var(--accent-coach); }
+
+  /* --- ROADMAP --- */
+  .roadmap {
+    position: relative;
+    padding-left: 3rem;
+    margin: 2rem 0;
+  }
+  .roadmap::before {
+    content: '';
+    position: absolute;
+    left: 15px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--accent-soul), var(--accent-counter), var(--accent-coach), var(--accent-warn));
+  }
+  .roadmap-item {
+    position: relative;
+    margin-bottom: 2.5rem;
+  }
+  .roadmap-item::before {
+    content: '';
+    position: absolute;
+    left: calc(-3rem + 8px);
+    top: 4px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 3px solid;
+    background: var(--bg-primary);
+  }
+  .roadmap-item:nth-child(1)::before { border-color: var(--accent-soul); }
+  .roadmap-item:nth-child(2)::before { border-color: var(--accent-counter); }
+  .roadmap-item:nth-child(3)::before { border-color: var(--accent-coach); }
+  .roadmap-item:nth-child(4)::before { border-color: var(--accent-warn); }
+  .roadmap-item:nth-child(5)::before { border-color: var(--text-muted); }
+  .roadmap-phase {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 0.35rem;
+  }
+  .roadmap-item h3 { font-size: 1.05rem; }
+
+  /* --- COMPETITOR CHART --- */
+  .comp-grid {
+    display: grid;
+    grid-template-columns: 2fr repeat(4, 1fr);
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    margin: 1.5rem 0;
+    font-size: 0.82rem;
+  }
+  .comp-grid > div {
+    padding: 0.65rem 0.85rem;
+    border-bottom: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+  }
+  .comp-grid > div:nth-child(5n) { border-right: none; }
+  .comp-header {
+    background: var(--bg-card);
+    font-weight: 600;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .comp-grid .yes { color: var(--accent-coach); }
+  .comp-grid .no { color: var(--text-muted); }
+  .comp-grid .partial { color: var(--accent-warn); }
+  .comp-grid .aegis { background: rgba(59, 130, 246, 0.05); }
+
+  /* --- SCROLL REVEAL --- */
+  .reveal {
+    opacity: 0;
+    transform: translateY(24px);
+    transition: opacity 0.6s ease, transform 0.6s ease;
+  }
+  .reveal.visible {
+    opacity: 1;
+    transform: none;
+  }
+
+  /* --- FOOTER --- */
+  footer {
+    padding: 3rem 0;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+  }
+
+  /* --- RESPONSIVE --- */
+  @media (max-width: 900px) {
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    .comparison-columns { grid-template-columns: 1fr; }
+    .comparison-divider { flex-direction: row; padding-top: 0; }
+    .comp-grid { font-size: 0.72rem; }
+    .comp-grid > div { padding: 0.5rem; }
+  }
+  @media (max-width: 640px) {
+    .nav-links { display: none; }
+    .nav-links.open {
+      display: flex;
+      flex-direction: column;
+      position: absolute;
+      top: 56px;
+      left: 0;
+      right: 0;
+      background: var(--bg-primary);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem;
+    }
+    .nav-toggle { display: block; }
+    .loop-container { flex-direction: column; }
+    .loop-arrow { transform: rotate(90deg); }
+    section { padding: 3rem 0; }
+    .container { padding: 0 1.25rem; }
+  }
+
+  /* --- PRINT --- */
+  @media print {
+    .reveal { opacity: 1 !important; transform: none !important; transition: none !important; }
+    nav { display: none; }
+    body { background: #fff; color: #111; }
+    .hero { min-height: auto; padding-top: 2rem; }
+    .card, .comparison-mock, details, .principle-box {
+      background: #f8f9fa;
+      border-color: #ddd;
+      break-inside: avoid;
+    }
+    .badge { border: 1px solid currentColor; }
+    section + section { border-top-color: #ddd; }
+    h1, h2, h3, strong, .principle-box .value { color: #111; }
+    p, td, .belief-value, .text-secondary { color: #333; }
+    th, .belief-label, .flow-step .time, .roadmap-phase { color: #666; }
+    a { color: #1a56db; }
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav id="mainNav">
+  <div class="nav-inner">
+    <span class="nav-brand">AegisTrader</span>
+    <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')" aria-label="Toggle navigation">&#9776;</button>
+    <ul class="nav-links">
+      <li><a href="#hero">Overview</a></li>
+      <li><a href="#loop">Product Loop</a></li>
+      <li><a href="#move1">Soul</a></li>
+      <li><a href="#move2">Forking</a></li>
+      <li><a href="#move3">Coaching</a></li>
+      <li><a href="#convergence">Convergence</a></li>
+      <li><a href="#decisions">Decisions</a></li>
+      <li><a href="#competitive">Market</a></li>
+      <li><a href="#boundaries">Boundaries</a></li>
+      <li><a href="#roadmap">Roadmap</a></li>
+      <li><a href="#questions">Questions</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero" id="hero">
+  <div class="container">
+    <div class="reveal">
+      <span class="hero-label">Ideation Session 2026-03-08</span>
+      <h1>Project AegisTrader:<br>Growing Trading Personalities</h1>
+      <p class="thesis">
+        AegisTrader is not a backtesting platform with AI features. It is a platform for
+        <strong>growing, experimenting on, and coaching trading personalities</strong>.
+        The backtest engine provides credibility. The soul provides the experience.
+        Users choose a trading philosophy, give it life experience through historical markets,
+        watch it develop beliefs and doctrine, fork it into alternate timelines, and coach it toward better judgment.
+      </p>
+      <div class="principle-box">
+        <div class="label">Governing Principle</div>
+        <div class="value">"Soul powered by backtest."</div>
+        <p style="margin-top:0.6rem;margin-bottom:0;font-size:0.88rem;">Every soul claim traces back to deterministic, reproducible evidence. The engine provides reproducibility and trust. The soul provides meaning and differentiation. Neither works without the other.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PRODUCT LOOP -->
+<section id="loop">
+  <div class="container">
+    <div class="reveal">
+      <h4>The Product Loop</h4>
+      <h2>Choose. Grow. Coach.</h2>
+      <p>Three moves that define the AegisTrader experience, forming a continuous cycle of personality development.</p>
+    </div>
+    <div class="loop-container reveal">
+      <div class="loop-step">
+        <div class="loop-icon soul">1</div>
+        <h3>Choose</h3>
+        <p>Pick a trading philosophy archetype and give it life</p>
+        <div style="margin-top:0.5rem"><span class="badge soul">Move 1: Soul</span></div>
+      </div>
+      <div class="loop-arrow">&rarr;</div>
+      <div class="loop-step">
+        <div class="loop-icon counter">2</div>
+        <h3>Grow</h3>
+        <p>Fork beliefs, run experiments, explore alternate timelines</p>
+        <div style="margin-top:0.5rem"><span class="badge counter">Move 2: Fork</span></div>
+      </div>
+      <div class="loop-arrow">&rarr;</div>
+      <div class="loop-step">
+        <div class="loop-icon coach">3</div>
+        <h3>Coach</h3>
+        <p>Shape development through review, guidance, and intervention</p>
+        <div style="margin-top:0.5rem"><span class="badge coach">Move 3: Coach</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- MOVE 1 -->
+<section id="move1">
+  <div class="container">
+    <div class="reveal">
+      <span class="badge soul">Move 1</span>
+      <h2>Soul as the Product</h2>
+      <p class="lead">
+        The trading soul &mdash; not the backtest engine &mdash; is the primary object of user attention.
+        <strong>"Grow trading personalities that learn from experience"</strong> is the pitch.
+        This creates a product category that does not exist.
+      </p>
+    </div>
+
+    <div class="reveal">
+      <h3 style="margin-top:2rem;margin-bottom:1.25rem;">Soul-First Onboarding Flow</h3>
+      <div class="flow">
+        <div class="flow-step">
+          <div class="time">Minute 0&ndash;2</div>
+          <h3>Archetype Picker</h3>
+          <p>Choose a trading philosophy: <strong>Mean Reversion</strong>, <strong>Trend Following</strong>, <strong>Event-Driven</strong>, or <strong>Defensive Value</strong>. Each archetype is a pre-built strategy.md + seed soul.md. The user is choosing a worldview, not configuring software.</p>
+        </div>
+        <div class="flow-step">
+          <div class="time">Minute 2&ndash;5</div>
+          <h3>Formative Experience</h3>
+          <p>System auto-selects a dramatic historical period and runs a compressed 3&ndash;6 month backtest. The UI emphasizes soul formation: <em>"Your agent just experienced its first 30% drawdown. It's forming its first scar tissue."</em></p>
+        </div>
+        <div class="flow-step">
+          <div class="time">Minute 5&ndash;10</div>
+          <h3>Soul Diff &mdash; The Hero Screen</h3>
+          <p>Before/after comparison showing how the agent changed. Every belief is evidence-linked: <em>"This agent now reduces size after consecutive losses &mdash; that came from losing 12% in week 3."</em></p>
+        </div>
+        <div class="flow-step">
+          <div class="time">Bridge</div>
+          <h3>Fork Prompt</h3>
+          <p><em>"Want to keep training? Or fork this soul and see what happens if it had a different experience?"</em> &mdash; bridges directly to counterfactual forking.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="reveal">
+      <details>
+        <summary>The Reframe: Before vs. After</summary>
+        <div class="details-body">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Before (PRD)</th><th>After (Soul-First)</th></tr></thead>
+              <tbody>
+                <tr><td>"Run backtests, see results"</td><td>"Grow a trading personality, watch it evolve"</td></tr>
+                <tr><td>Backtest results are the output</td><td>Soul evolution is the output</td></tr>
+                <tr><td>Branch DAG is debugging</td><td>Branch DAG is biography</td></tr>
+                <tr><td>PnL charts are the hero</td><td>Soul diff is the hero</td></tr>
+                <tr><td>User is an operator</td><td>User is a curator / coach</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+      <details>
+        <summary>Critical Constraints</summary>
+        <div class="details-body">
+          <ul>
+            <li><strong>Seed archetype quality is non-negotiable.</strong> Each archetype's strategy.md must be a genuinely viable trading approach, not a demo. A bad first backtest kills the onboarding.</li>
+            <li><strong>Evidence-linking prevents "gimmick" perception.</strong> Without concrete trade-to-belief links, the soul-first framing risks feeling like marketing rather than substance.</li>
+          </ul>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- MOVE 2 -->
+<section id="move2">
+  <div class="container">
+    <div class="reveal">
+      <span class="badge counter">Move 2</span>
+      <h2>Counterfactual Soul Forking</h2>
+      <p class="lead">
+        Fork an agent's <strong>beliefs</strong> &mdash; not just its trades &mdash; to run "what if" experiments
+        on trading psychology itself. The branch DAG becomes a psychology lab.
+        The soul becomes a research subject the user experiments on.
+      </p>
+    </div>
+
+    <div class="grid-2 reveal">
+      <div class="card counter">
+        <span class="badge mvp">MVP</span>
+        <h3>Trauma Test</h3>
+        <p><strong>Question:</strong> "What if my agent started in 2019 vs 2022?"</p>
+        <p>Clone the same archetype. Run one through a bull market era, one through a bear market era. Compare the resulting souls side by side.</p>
+        <p>The bull-market agent becomes aggressive and naive about drawdowns. The bear-forged agent becomes cautious and misses rallies. <strong>Neither is "right"</strong> &mdash; the divergence teaches how experience shapes doctrine.</p>
+        <p style="margin-bottom:0;"><strong>Implementation:</strong> Same strategy, different time ranges, compare resulting souls. Builds on existing branch DAG.</p>
+      </div>
+      <div class="card counter">
+        <span class="badge counter">V2</span>
+        <h3>Selective Amnesia</h3>
+        <p><strong>Question:</strong> "What if my agent forgot its worst month?"</p>
+        <p>Remove a specific period from a mature soul's experience. Re-derive the soul from branch history minus the excluded period.</p>
+        <p>Tests whether specific scars are <strong>wisdom or damage</strong>. <em>"Which scars are useful and which are just damage?"</em></p>
+        <p style="margin-bottom:0;"><strong>Implementation:</strong> Non-trivial. Beliefs are interconnected. Requires re-derivation from parameterized experience set.</p>
+      </div>
+    </div>
+
+    <div class="reveal">
+      <details>
+        <summary>Architecture Impact</summary>
+        <div class="details-body">
+          <ul>
+            <li><strong>New entity: "soul fork"</strong> &mdash; distinct from branch (branch = alternate trades within a run, soul fork = alternate life experiences across runs)</li>
+            <li>Soul comparison infrastructure with divergence ranking and prioritization</li>
+            <li>Experience-set parameterization for soul derivation</li>
+            <li>Multi-run stability checking for counterfactual claims</li>
+          </ul>
+        </div>
+      </details>
+      <details>
+        <summary>Critical Constraints</summary>
+        <div class="details-body">
+          <ul>
+            <li><strong>LLM non-determinism could undermine counterfactual claims.</strong> The same agent run through the same period twice may produce different soul reflections due to LLM variance. Mitigation: run each condition multiple times and surface only stable, reproducible differences.</li>
+            <li><strong>Comparison UX must surface top 3&ndash;5 divergences,</strong> not dump everything. The screen needs intelligent summarization.</li>
+          </ul>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- MOVE 3 -->
+<section id="move3">
+  <div class="container">
+    <div class="reveal">
+      <span class="badge coach">Move 3</span>
+      <h2>User as Coach</h2>
+      <p class="lead">
+        Replace the binary approve/reject model with a <strong>coaching paradigm</strong>.
+        The user is a coach developing a trading personality, not an admin approving file changes.
+      </p>
+    </div>
+
+    <div class="grid-3 reveal">
+      <div class="card coach">
+        <span class="badge mvp">MVP</span>
+        <h3>"Let it Learn"</h3>
+        <h4>Passive Mode</h4>
+        <p>Post-game film review. User reviews soul diffs after runs, accepts or flags specific beliefs.</p>
+        <p style="margin-bottom:0;">Reframe: <em>"Reviewing a lesson plan,"</em> not <em>"approving a patch."</em></p>
+      </div>
+      <div class="card coach">
+        <span class="badge counter">v1.5</span>
+        <h3>"Guided Reflection"</h3>
+        <h4>Active Mode</h4>
+        <p>User provides natural language coaching before soul update commits: <em>"You're over-weighting the losses in week 3."</em></p>
+        <p style="margin-bottom:0;">The user shapes the reflection, not the conclusion. This is where most users find the most value.</p>
+      </div>
+      <div class="card coach">
+        <span class="badge mvp">MVP</span>
+        <h3>"Soul Surgery"</h3>
+        <h4>Direct Mode</h4>
+        <p>Power-user direct editing of soul.md / soul.json. Manual edits source-tagged as <code style="color:var(--accent-coach);">coach_override</code>.</p>
+        <p style="margin-bottom:0;">The agent distinguishes coached beliefs from self-learned ones.</p>
+      </div>
+    </div>
+
+    <div class="reveal">
+      <div class="card" style="margin-top:1rem;">
+        <h3>Soul Studio UI <span class="badge counter" style="vertical-align:middle;margin-left:0.5rem;">v2</span></h3>
+        <div class="grid-3" style="margin-top:1rem;">
+          <div>
+            <h4 style="color:var(--accent-soul);">Left: Soul Timeline</h4>
+            <p style="font-size:0.88rem;">Version history color-coded by source. Self-learned = <span style="color:var(--accent-soul);">blue</span>, coached = <span style="color:var(--accent-coach);">green</span>, counterfactual = <span style="color:var(--accent-counter);">purple</span>. Aggressive filtering from day one.</p>
+          </div>
+          <div>
+            <h4 style="color:var(--accent-coach);">Center: Belief Cards</h4>
+            <p style="font-size:0.88rem;">Current soul as interactive cards. Each shows belief, confidence, evidence count, and a "Challenge" button for coaching intervention.</p>
+          </div>
+          <div>
+            <h4 style="color:var(--accent-counter);">Right: Evidence Drawer</h4>
+            <p style="font-size:0.88rem;">Supporting trades, branches, runs, and PnL impact for any selected belief. The receipts behind every claim.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="reveal">
+      <div class="card coach" style="margin-top:0.5rem;">
+        <h3>Retention Hook: "Am I a Good Coach?"</h3>
+        <p>Track coached beliefs vs. organic beliefs over time. Surface coaching effectiveness: <em>"Your coaching improved returns by 12% over what the agent would have learned on its own."</em></p>
+        <p style="margin-bottom:0;">Per-belief attribution shows which user intuitions are actually correct. Turns engagement from passive observation into a <strong>trackable skill</strong>.</p>
+      </div>
+    </div>
+
+    <div class="reveal">
+      <details>
+        <summary>Critical Constraints</summary>
+        <div class="details-body">
+          <ul>
+            <li><strong>Full Soul Studio is too heavy for MVP.</strong> Start with simplified belief cards and soul diff review, add three-panel layout in v2.</li>
+            <li><strong>Source tagging in soul.json is non-negotiable from day one.</strong> Without <code>source</code> fields from the start, retrofitting provenance is painful.</li>
+            <li><strong>The agent must push back on coaching.</strong> If it rubber-stamps every override, users lose trust. <em>"Evidence from runs #23-#31 supports my current belief. Are you sure?"</em></li>
+          </ul>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- CONVERGENCE -->
+<section id="convergence">
+  <div class="container">
+    <div class="reveal">
+      <h4>Signature UX</h4>
+      <h2>Soul Comparison &mdash; The Convergence Screen</h2>
+      <p class="lead">
+        The side-by-side soul comparison screen is where <strong>all three moves converge into a single experience</strong>.
+        It is the screen where AegisTrader's identity crystallizes for the user.
+      </p>
+    </div>
+
+    <div class="comparison-mock reveal">
+      <div class="comparison-header">
+        <h3 style="margin-bottom:0.5rem;">Soul Comparison: Bull vs. Bear Experience</h3>
+        <p style="font-size:0.85rem;margin-bottom:0;">Same archetype (Trend Following). Different formative eras. Top 3 divergences shown.</p>
+      </div>
+      <div class="comparison-columns">
+        <div class="comparison-col bull">
+          <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">
+            <span class="badge soul">Bull-Market Agent</span>
+            <span style="font-size:0.75rem;color:var(--text-muted);">2019&ndash;2021</span>
+          </div>
+          <div class="belief-item">
+            <div class="belief-label">Position Sizing</div>
+            <div class="belief-value"><strong>Aggressive scaling</strong> &mdash; "momentum rewards conviction." Increases size during winning streaks.</div>
+          </div>
+          <div class="belief-item">
+            <div class="belief-label">Drawdown Response</div>
+            <div class="belief-value"><strong>Hold through dips</strong> &mdash; "drawdowns are buying opportunities." Max 15% drawdown experienced.</div>
+          </div>
+          <div class="belief-item">
+            <div class="belief-label">Risk Tolerance</div>
+            <div class="belief-value"><strong>High</strong> &mdash; never learned fear. Lost 8% max in any single week.</div>
+          </div>
+        </div>
+        <div class="comparison-divider">
+          <div class="vs-badge">VS</div>
+          <span style="writing-mode:vertical-lr;font-size:0.7rem;letter-spacing:0.1em;">DIVERGENCE</span>
+        </div>
+        <div class="comparison-col bear">
+          <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">
+            <span class="badge counter">Bear-Market Agent</span>
+            <span style="font-size:0.75rem;color:var(--text-muted);">2022&ndash;2023</span>
+          </div>
+          <div class="belief-item">
+            <div class="belief-label">Position Sizing</div>
+            <div class="belief-value"><strong>Conservative scaling</strong> &mdash; "protect capital first." Reduces size after consecutive losses.</div>
+          </div>
+          <div class="belief-item">
+            <div class="belief-label">Drawdown Response</div>
+            <div class="belief-value"><strong>Cut losses quickly</strong> &mdash; "drawdowns compound." Max 35% drawdown experienced.</div>
+          </div>
+          <div class="belief-item">
+            <div class="belief-label">Risk Tolerance</div>
+            <div class="belief-value"><strong>Low</strong> &mdash; "scar tissue from losing 12% in week 3." Misses 40% of rallies.</div>
+          </div>
+        </div>
+      </div>
+      <div class="coach-actions">
+        <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem;">All three moves in one interaction:</p>
+        <span class="btn-mock soul">View Evidence</span>
+        <span class="btn-mock counter">Fork Again</span>
+        <span class="btn-mock coach">Coach This Soul</span>
+      </div>
+    </div>
+
+    <div class="reveal">
+      <p>On this screen, the user simultaneously:</p>
+      <ul style="padding-left:1.5rem;color:var(--text-secondary);">
+        <li><strong>Sees two souls shaped by different experiences</strong> (counterfactual forking)</li>
+        <li><strong>Reads their divergent beliefs with evidence links</strong> (soul-as-product)</li>
+        <li><strong>Can challenge or coach either one</strong> (coaching UX)</li>
+      </ul>
+      <p style="margin-top:1rem;">
+        <strong>Design priority:</strong> This screen should receive outsized design investment.
+        It is not a comparison utility &mdash; it is the product's defining interaction.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- KEY DESIGN DECISIONS -->
+<section id="decisions">
+  <div class="container">
+    <div class="reveal">
+      <h2>Key Design Decisions</h2>
+    </div>
+
+    <div class="card reveal">
+      <h3>1. Evidence Chain as Shared Infrastructure</h3>
+      <p>All three moves depend on <strong>structured evidence provenance for every belief in soul.json</strong>. This is the architectural foundation.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Move</th><th>What It Needs from Evidence Chain</th></tr></thead>
+          <tbody>
+            <tr><td><span class="badge soul" style="margin:0;">Soul Diffs</span></td><td>Verifiable links from each belief to the trades/runs that produced it</td></tr>
+            <tr><td><span class="badge counter" style="margin:0;">Counterfactual</span></td><td>Distinguishing genuine experience-driven divergence from LLM noise</td></tr>
+            <tr><td><span class="badge coach" style="margin:0;">Coaching</span></td><td>Measuring whether coached beliefs outperform self-learned ones</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <details style="margin-top:1rem;">
+        <summary>Required evidence_refs[] Schema</summary>
+        <div class="details-body">
+          <ul>
+            <li><code>run_id</code> / <code>branch_id</code> &mdash; which run or branch produced this evidence</li>
+            <li><code>trade_ids[]</code> &mdash; which specific trades support the belief</li>
+            <li><code>branch_comparisons[]</code> &mdash; which branch-vs-branch comparisons tested it</li>
+            <li><code>confidence</code> &mdash; confidence level based on sample size</li>
+            <li><code>source_type</code> &mdash; <code>self_learned</code> | <code>coach_override</code> | <code>coach_guided</code> | <code>counterfactual_derived</code></li>
+            <li><code>timestamp</code> &mdash; when this evidence was incorporated</li>
+          </ul>
+          <p style="margin-top:0.75rem;margin-bottom:0;"><strong>MVP requirement:</strong> The evidence chain schema must ship in Phase 1. Retrofitting structured provenance onto flat evidence lists is architecturally painful.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="grid-2 reveal">
+      <div class="card">
+        <h3>2. Deterministic Boundary Stays Sharp</h3>
+        <p>The two-layer architecture is preserved. The soul-first framing makes the deterministic engine <em>more</em> important, not less &mdash; it is the credibility layer.</p>
+        <p style="margin-bottom:0;">The non-deterministic layer may only produce proposals, annotations, and hypotheses. The deterministic layer alone produces accepted decisions, fills, and branch outcomes.</p>
+      </div>
+      <div class="card">
+        <h3>3. Source Tagging From Day One</h3>
+        <p>Every belief in soul.json carries a <code>source</code> field from MVP launch. Non-negotiable.</p>
+        <p style="margin-bottom:0;">Enables: agent pushback on coaching, coaching effectiveness measurement, counterfactual provenance, and soul integrity over time.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- COMPETITIVE -->
+<section id="competitive">
+  <div class="container">
+    <div class="reveal">
+      <h2>Competitive Positioning</h2>
+      <p class="lead">AegisTrader targets a white space where no existing platform operates. Algorithmic trading market: <strong>$24B (2025) projected to $44.5B (2030)</strong>, 13.2% CAGR.</p>
+    </div>
+
+    <div class="reveal">
+      <h3 style="margin-top:1.5rem;">Moat: Four Things No Competitor Offers Together</h3>
+      <div class="comp-grid">
+        <div class="comp-header">Platform</div>
+        <div class="comp-header">Deterministic Simulation</div>
+        <div class="comp-header">Evolving Souls</div>
+        <div class="comp-header">Branch DAG</div>
+        <div class="comp-header">Coaching UX</div>
+
+        <div class="aegis"><strong style="color:var(--accent-soul);">AegisTrader</strong></div>
+        <div class="aegis yes">Yes</div>
+        <div class="aegis yes">Yes</div>
+        <div class="aegis yes">Yes</div>
+        <div class="aegis yes">Yes</div>
+
+        <div>QuantConnect</div>
+        <div class="yes">Yes</div>
+        <div class="no">No</div>
+        <div class="no">No</div>
+        <div class="no">No</div>
+
+        <div>Composer</div>
+        <div class="partial">Partial</div>
+        <div class="no">No</div>
+        <div class="no">No</div>
+        <div class="no">No</div>
+
+        <div>NautilusTrader</div>
+        <div class="yes">Yes</div>
+        <div class="no">No (by design)</div>
+        <div class="no">No</div>
+        <div class="no">No</div>
+
+        <div>Numerai</div>
+        <div class="no">No</div>
+        <div class="no">No</div>
+        <div class="no">No</div>
+        <div class="no">No</div>
+
+        <div>AI Agent Frameworks</div>
+        <div class="no">No</div>
+        <div class="partial">Emerging</div>
+        <div class="partial">LangGraph only</div>
+        <div class="no">No</div>
+      </div>
+    </div>
+
+    <div class="reveal">
+      <details>
+        <summary>Key Market Gaps AegisTrader Fills</summary>
+        <div class="details-body">
+          <ul>
+            <li><strong>No platform combines deterministic backtesting with AI agent exploration.</strong> QuantConnect has backtesting but no agents. Agent frameworks have agents but no simulation core.</li>
+            <li><strong>No platform offers branch DAG exploration for trading strategies.</strong> Git-like history for trading decisions is genuinely novel.</li>
+            <li><strong>No platform has "trading soul" evolution.</strong> Agents developing durable, versioned, evidence-linked doctrine over time is unique.</li>
+            <li><strong>No platform bridges natural language strategy definition with deterministic execution.</strong></li>
+            <li><strong>Multi-agent competition within a personal research environment</strong> is not offered by any existing product.</li>
+          </ul>
+        </div>
+      </details>
+      <details>
+        <summary>Competitive Risks</summary>
+        <div class="details-body">
+          <ul>
+            <li>QuantConnect could add AI features (backtesting engine + community already exist)</li>
+            <li>LangChain/LangGraph ecosystem could release a finance-specific template</li>
+            <li>Alpaca or other brokers could build a first-party AI research layer</li>
+            <li>General AI coding agents could reduce perceived need for a specialized platform</li>
+          </ul>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- BOUNDARIES -->
+<section id="boundaries">
+  <div class="container">
+    <div class="reveal">
+      <h2>Boundaries</h2>
+      <p>What AegisTrader is <strong>not</strong>.</p>
+    </div>
+    <div class="grid-2 reveal">
+      <div class="card">
+        <h3>Not a Brokerage</h3>
+        <p style="margin-bottom:0;">AegisTrader does not execute real-money trades in initial versions. Paper trading and research tooling only.</p>
+      </div>
+      <div class="card">
+        <h3>Not Financial Advice</h3>
+        <p style="margin-bottom:0;">The platform must clearly label itself as paper trading and research tooling. No investment recommendations.</p>
+      </div>
+      <div class="card">
+        <h3>Not an Opaque AI Black Box</h3>
+        <p style="margin-bottom:0;">Every soul belief links to evidence. Every decision is inspectable. The soul is interpretation, not truth.</p>
+      </div>
+      <div class="card">
+        <h3>The Soul Is Not the Source of Truth</h3>
+        <p style="margin-bottom:0;">The <strong>deterministic engine</strong> is. The soul is a learned interpretation of truth &mdash; derived, versioned, diffable, and replay-linked.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ROADMAP -->
+<section id="roadmap">
+  <div class="container">
+    <div class="reveal">
+      <h2>Phasing Roadmap</h2>
+      <p>The existing PRD phases remain valid. The soul-first framing reshapes what ships in each phase and adds a v1.5 milestone.</p>
+    </div>
+
+    <div class="roadmap reveal">
+      <div class="roadmap-item">
+        <div class="roadmap-phase" style="color:var(--accent-soul);">Phase 1 &mdash; MVP</div>
+        <h3>Single-Agent Soul Evolution</h3>
+        <p>Archetype picker with 4 trading philosophies. Compressed formative experience backtest. Soul diff as hero screen with evidence links. Trauma Test counterfactual. Side-by-side soul comparison with divergence ranking. Passive coaching + Soul Surgery. Source tagging and structured evidence_refs in soul.json.</p>
+      </div>
+      <div class="roadmap-item">
+        <div class="roadmap-phase" style="color:var(--accent-counter);">Phase 1.5 <span class="badge counter" style="vertical-align:middle;font-size:0.6rem;">NEW</span></div>
+        <h3>Guided Coaching</h3>
+        <p>Guided Reflection mode (natural language coaching). Challenge button on belief cards. Enhanced Soul Studio layout.</p>
+      </div>
+      <div class="roadmap-item">
+        <div class="roadmap-phase" style="color:var(--accent-coach);">Phase 2</div>
+        <h3>Multi-Agent Competition</h3>
+        <p>As currently defined in PRD, plus coaching effectiveness tracking across agents and per-agent soul comparison.</p>
+      </div>
+      <div class="roadmap-item">
+        <div class="roadmap-phase" style="color:var(--accent-warn);">Phase 3</div>
+        <h3>Live Paper Trading</h3>
+        <p>As currently defined, plus live soul updates with coaching review before commit and coaching effectiveness dashboard.</p>
+      </div>
+      <div class="roadmap-item">
+        <div class="roadmap-phase" style="color:var(--text-muted);">Phase 4</div>
+        <h3>Governance &amp; Advanced Features</h3>
+        <p>Selective Amnesia counterfactual. Full coaching effectiveness analytics. Evaluate Adversarial Soul Dynamics based on user demand.</p>
+      </div>
+    </div>
+
+    <div class="reveal">
+      <details>
+        <summary>New Elements to Add to PRD</summary>
+        <div class="details-body">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Element</th><th>Target</th></tr></thead>
+              <tbody>
+                <tr><td>Archetype templates (strategy.md + seed soul.md)</td><td><span class="badge mvp" style="margin:0;">MVP</span></td></tr>
+                <tr><td>Soul fork entity in data model</td><td><span class="badge mvp" style="margin:0;">MVP</span></td></tr>
+                <tr><td>Structured evidence_refs[] in soul.json</td><td><span class="badge mvp" style="margin:0;">MVP</span></td></tr>
+                <tr><td>Source field in soul.json schema</td><td><span class="badge mvp" style="margin:0;">MVP</span></td></tr>
+                <tr><td>Side-by-side soul comparison screen</td><td><span class="badge mvp" style="margin:0;">MVP</span></td></tr>
+                <tr><td>CoachingInput, BeliefProvenance entities</td><td><span class="badge mvp" style="margin:0;">MVP</span></td></tr>
+                <tr><td>Guided Reflection mode</td><td><span class="badge counter" style="margin:0;">v1.5</span></td></tr>
+                <tr><td>Full Soul Studio three-panel UI</td><td><span class="badge counter" style="margin:0;">v2</span></td></tr>
+                <tr><td>Selective Amnesia counterfactual</td><td><span class="badge counter" style="margin:0;">v2</span></td></tr>
+                <tr><td>Coaching effectiveness dashboard</td><td><span class="badge counter" style="margin:0;">v2</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+      <details>
+        <summary>Deferred Ideas</summary>
+        <div class="details-body">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Idea</th><th>Reason Deferred</th><th>Revisit</th></tr></thead>
+              <tbody>
+                <tr><td>Adversarial Soul Dynamics</td><td>Premature complexity; multi-agent basics need to work first</td><td>Phase 3/4</td></tr>
+                <tr><td>Cross-Training Counterfactual</td><td>Unclear user value; academic curiosity</td><td>User demand</td></tr>
+                <tr><td>Broad Belief Graduation</td><td>Risks eroding the deterministic boundary</td><td>If narrow version works</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- OPEN QUESTIONS -->
+<section id="questions">
+  <div class="container">
+    <div class="reveal">
+      <h2>Open Questions</h2>
+      <p>Key tensions requiring empirical resolution.</p>
+    </div>
+
+    <div class="reveal">
+      <div class="card" style="border-left:4px solid var(--accent-warn);">
+        <h3>1. LLM Non-Determinism in Counterfactuals</h3>
+        <p style="margin-bottom:0;">How many runs are needed to establish stable soul divergences? What's the threshold for surfacing a difference as "real" vs. noise? Needs empirical testing during Phase 1.</p>
+      </div>
+      <div class="card" style="border-left:4px solid var(--accent-warn);">
+        <h3>2. Guided Reflection Quality</h3>
+        <p style="margin-bottom:0;">Can LLMs reliably integrate vague natural language coaching (<em>"you're too cautious"</em>) into coherent, structured soul updates? Determines whether v1.5 ships as designed.</p>
+      </div>
+      <div class="card" style="border-left:4px solid var(--accent-warn);">
+        <h3>3. Soul Timeline Noise Management</h3>
+        <p style="margin-bottom:0;">After 20+ runs, the soul timeline will be dense. What summarization and grouping strategies keep it usable? Must ship with filtering from day one.</p>
+      </div>
+      <div class="card" style="border-left:4px solid var(--accent-warn);">
+        <h3>4. Archetype Design</h3>
+        <p style="margin-bottom:0;">Who designs the seed strategy.md + soul.md for each archetype? These must be genuinely viable strategies &mdash; they are the product's first impression.</p>
+      </div>
+      <div class="card" style="border-left:4px solid var(--accent-warn);">
+        <h3>5. Coaching Effectiveness Validity</h3>
+        <p style="margin-bottom:0;">How much run history is needed before coaching effectiveness metrics are statistically meaningful? Early results may be noisy.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="container">
+    <p>Session: ideation-aegistrader-20260308-102717 &nbsp;|&nbsp; 2026-03-08 &nbsp;|&nbsp; Depth: Standard</p>
+    <p style="margin-top:0.35rem;">Participants: Free Thinker, Grounder, Explorer, Writer</p>
+    <p style="margin-top:0.35rem;">Sources: docs/Concept_1.md, docs/PRD.md, 2 competitive research reports, 3 briefs, 5 snapshots</p>
+  </div>
+</footer>
+
+<script>
+(function() {
+  // Scroll reveal
+  const reveals = document.querySelectorAll('.reveal');
+  const observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+      }
+    });
+  }, { threshold: 0.08, rootMargin: '0px 0px -40px 0px' });
+  reveals.forEach(function(el) { observer.observe(el); });
+
+  // Nav scroll effect
+  var nav = document.getElementById('mainNav');
+  window.addEventListener('scroll', function() {
+    nav.classList.toggle('scrolled', window.scrollY > 40);
+  });
+
+  // Active nav link
+  var sections = document.querySelectorAll('section[id]');
+  var navLinks = document.querySelectorAll('.nav-links a');
+  window.addEventListener('scroll', function() {
+    var scrollPos = window.scrollY + 100;
+    sections.forEach(function(section) {
+      if (scrollPos >= section.offsetTop && scrollPos < section.offsetTop + section.offsetHeight) {
+        navLinks.forEach(function(a) { a.classList.remove('active'); });
+        var active = document.querySelector('.nav-links a[href="#' + section.id + '"]');
+        if (active) active.classList.add('active');
+      }
+    });
+  });
+
+  // Close mobile nav on link click
+  document.querySelectorAll('.nav-links a').forEach(function(a) {
+    a.addEventListener('click', function() {
+      document.querySelector('.nav-links').classList.remove('open');
+    });
+  });
+})();
+</script>
+</body>
+</html>
