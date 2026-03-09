@@ -54,6 +54,7 @@ class Engine:
         self.portfolio = PortfolioState(
             cash=config.initial_capital,
             high_water_mark=config.initial_capital,
+            initial_capital=config.initial_capital,
         )
         self.fill_model = FillModel(slippage_bps=config.slippage_bps, rng=self.rng)
         self.fee_model = FeeModel(per_share=config.fee_per_share, percentage=config.fee_percentage)
@@ -225,7 +226,7 @@ class Engine:
                             "barIndex": bar_idx,
                         })
 
-                        # Size position
+                        # Size position — strategy returns exact {side, quantity}
                         try:
                             size = self.strategy.size_position(self.portfolio, {
                                 "action": signal.action,
@@ -237,22 +238,27 @@ class Engine:
                             logger.warning(f"size_position error: {e}")
                             size = {"quantity": 0}
 
-                        if isinstance(size, dict):
-                            size = SizeDecision(quantity=size.get("quantity", 0))
+                        if not isinstance(size, dict):
+                            size = {"quantity": getattr(size, "quantity", 0)}
 
-                        if size.quantity > 0:
-                            side = Side.BUY if signal.action == "buy" else Side.SELL
+                        order_side_str = size.get("side", signal.action)
+                        order_qty = size.get("quantity", 0)
+
+                        if order_qty > 0 and order_side_str in ("buy", "sell"):
+                            side = Side.BUY if order_side_str == "buy" else Side.SELL
                             order = ProposedOrder(
                                 symbol=signal.symbol,
                                 side=side,
                                 order_type=OrderType.MARKET,
-                                quantity=size.quantity,
+                                quantity=order_qty,
                             )
 
-                            # Risk gate
+                            # Risk gate — strategy decides what to gate
                             try:
                                 risk = self.strategy.risk_gate(
-                                    order, self.portfolio, market_state
+                                    {"symbol": order.symbol, "side": order.side.value,
+                                     "quantity": order.quantity},
+                                    self.portfolio, market_state,
                                 )
                             except Exception as e:
                                 logger.warning(f"risk_gate error: {e}")
@@ -429,7 +435,7 @@ class Engine:
 
         # Annualized return (assume 252 trading days)
         n_bars = len(equities)
-        if n_bars > 1:
+        if n_bars > 1 and (1 + total_return) > 0:
             annualized = round(((1 + total_return) ** (252 / n_bars)) - 1, 8)
         else:
             annualized = 0.0
@@ -457,20 +463,19 @@ class Engine:
 
         # Compute round-trip trade PnL from fills
         trade_pnls = self._compute_trade_pnls()
-        total_trades = len(self.all_fills)
-        closed_trades = len(trade_pnls)
+        total_trades = len(trade_pnls)  # Round-trip trades (like TradingView)
         winning_trades = [p for p in trade_pnls if p > 0]
         losing_trades = [p for p in trade_pnls if p < 0]
 
-        win_rate = round(len(winning_trades) / closed_trades, 8) if closed_trades > 0 else 0
+        win_rate = round(len(winning_trades) / total_trades, 8) if total_trades > 0 else 0
 
         gross_profit = sum(winning_trades)
         gross_loss = abs(sum(losing_trades))
         profit_factor = round(gross_profit / gross_loss, 8) if gross_loss > 0 else 0
 
         avg_trade_return = (
-            round(sum(trade_pnls) / (closed_trades * initial_equity), 8)
-            if closed_trades > 0 else 0
+            round(sum(trade_pnls) / (total_trades * initial_equity), 8)
+            if total_trades > 0 else 0
         )
 
         return {

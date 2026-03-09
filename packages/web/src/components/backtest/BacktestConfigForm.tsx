@@ -9,10 +9,11 @@ export function BacktestConfigForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const today = new Date().toISOString().split('T')[0];
   const [config, setConfig] = useState({
     symbols: 'AAPL',
-    startDate: '2022-01-01',
-    endDate: '2023-01-01',
+    startDate: '1980-12-12',
+    endDate: today,
     timeframe: '1Day',
     initialCapital: 100000,
     slippageBps: 5,

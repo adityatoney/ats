@@ -36,6 +36,7 @@ class PortfolioState:
     positions: dict[str, Position] = field(default_factory=dict)
     realized_pnl: float = 0.0
     high_water_mark: float = 0.0
+    initial_capital: float = 0.0
 
     @property
     def equity(self) -> float:
@@ -57,33 +58,98 @@ class PortfolioState:
         if eq > self.high_water_mark:
             self.high_water_mark = eq
 
-    def apply_fill(self, symbol: str, side: str, quantity: int, price: float, fee: float):
+    def apply_fill(self, symbol: str, side: str, quantity: float, price: float, fee: float):
+        pos = self.positions.get(symbol)
+        pos_qty = pos.quantity if pos else 0.0
+
         if side == "buy":
-            if symbol in self.positions:
-                pos = self.positions[symbol]
-                total_cost = pos.avg_entry_price * pos.quantity + price * quantity
-                pos.quantity += quantity
-                pos.avg_entry_price = round(total_cost / pos.quantity, 8) if pos.quantity else 0
-                pos.current_price = price
-            else:
-                self.positions[symbol] = Position(
-                    symbol=symbol,
-                    quantity=quantity,
-                    avg_entry_price=price,
-                    current_price=price,
-                )
-            self.cash -= round(price * quantity + fee, 8)
-        elif side == "sell":
-            if symbol in self.positions:
-                pos = self.positions[symbol]
-                pnl = round((price - pos.avg_entry_price) * quantity, 8)
-                pos.realized_pnl += pnl
+            if pos_qty < 0:
+                # Covering short position (partially or fully)
+                close_qty = min(quantity, abs(pos_qty))
+                pnl = round((pos.avg_entry_price - price) * close_qty, 8)
                 self.realized_pnl += pnl
-                pos.quantity -= quantity
-                pos.current_price = price
-                if pos.quantity <= 0:
+                pos.realized_pnl += pnl
+
+                remaining = quantity - close_qty
+                new_short_qty = abs(pos_qty) - close_qty
+
+                if remaining > 0:
+                    # Closed entire short, now opening long with remainder
+                    self.positions[symbol] = Position(
+                        symbol=symbol,
+                        quantity=remaining,
+                        avg_entry_price=price,
+                        current_price=price,
+                        realized_pnl=pos.realized_pnl,
+                    )
+                elif new_short_qty > 0:
+                    # Partially closed short
+                    pos.quantity = -new_short_qty
+                    pos.current_price = price
+                else:
+                    # Exactly closed short
                     del self.positions[symbol]
-                self.cash += round(price * quantity - fee, 8)
+            else:
+                # Opening or adding to long position
+                if pos:
+                    total_cost = pos.avg_entry_price * pos_qty + price * quantity
+                    pos.quantity += quantity
+                    pos.avg_entry_price = (
+                        round(total_cost / pos.quantity, 8) if pos.quantity else 0
+                    )
+                    pos.current_price = price
+                else:
+                    self.positions[symbol] = Position(
+                        symbol=symbol,
+                        quantity=quantity,
+                        avg_entry_price=price,
+                        current_price=price,
+                    )
+            self.cash -= round(price * quantity + fee, 8)
+
+        elif side == "sell":
+            if pos_qty > 0:
+                # Closing long position (partially or fully)
+                close_qty = min(quantity, pos_qty)
+                pnl = round((price - pos.avg_entry_price) * close_qty, 8)
+                self.realized_pnl += pnl
+                pos.realized_pnl += pnl
+
+                remaining = quantity - close_qty
+                new_long_qty = pos_qty - close_qty
+
+                if remaining > 0:
+                    # Closed entire long, now opening short with remainder
+                    self.positions[symbol] = Position(
+                        symbol=symbol,
+                        quantity=-remaining,
+                        avg_entry_price=price,
+                        current_price=price,
+                        realized_pnl=pos.realized_pnl,
+                    )
+                elif new_long_qty > 0:
+                    # Partially closed long
+                    pos.quantity = new_long_qty
+                    pos.current_price = price
+                else:
+                    # Exactly closed long
+                    del self.positions[symbol]
+            else:
+                # Opening or adding to short position
+                if pos:
+                    total_cost = pos.avg_entry_price * abs(pos_qty) + price * quantity
+                    new_short_qty = abs(pos_qty) + quantity
+                    pos.quantity = -new_short_qty
+                    pos.avg_entry_price = round(total_cost / new_short_qty, 8)
+                    pos.current_price = price
+                else:
+                    self.positions[symbol] = Position(
+                        symbol=symbol,
+                        quantity=-quantity,
+                        avg_entry_price=price,
+                        current_price=price,
+                    )
+            self.cash += round(price * quantity - fee, 8)
 
     def snapshot(self, bar_index: int, timestamp: str) -> dict[str, Any]:
         return {
@@ -102,6 +168,7 @@ class PortfolioState:
             "positions": {s: p.to_dict() for s, p in self.positions.items()},
             "realized_pnl": round(self.realized_pnl, 8),
             "high_water_mark": round(self.high_water_mark, 8),
+            "initial_capital": round(self.initial_capital, 8),
         }
 
     @staticmethod
@@ -120,4 +187,5 @@ class PortfolioState:
             positions=positions,
             realized_pnl=data.get("realized_pnl", 0),
             high_water_mark=data.get("high_water_mark", 0),
+            initial_capital=data.get("initial_capital", 0),
         )

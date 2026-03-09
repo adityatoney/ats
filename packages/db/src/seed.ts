@@ -77,19 +77,57 @@ def generate_signal(state, portfolio):
 
 def size_position(portfolio, signal):
     if signal is None:
-        return {"quantity": 0}
-    equity = portfolio.equity
+        return {"side": "", "quantity": 0}
+    action = signal.get("action", "")
+    symbol = signal.get("symbol", "")
     price = signal.get("price", 0)
     if price <= 0:
-        return {"quantity": 0}
-    max_position_value = equity * 0.5
-    quantity = int(max_position_value / price)
-    return {"quantity": quantity}
+        return {"side": "", "quantity": 0}
+
+    # Check current position for this symbol
+    pos = portfolio.positions.get(symbol)
+    current_qty = pos.quantity if pos else 0
+
+    if action == "buy":
+        # Buy 50% of equity worth, minus what we already hold
+        target_qty = int(portfolio.equity * 0.5 / price)
+        buy_qty = max(0, target_qty - max(0, current_qty))
+        if buy_qty > 0:
+            return {"side": "buy", "quantity": buy_qty}
+
+    elif action == "sell":
+        # Close entire long position
+        if current_qty > 0:
+            return {"side": "sell", "quantity": int(current_qty)}
+
+    return {"side": "", "quantity": 0}
+
+
+## === RISK CONFIGURATION ===
+# "initial_capital" = drawdown measured from starting capital (resets never)
+# "high_water_mark" = drawdown measured from peak equity (ratchets up)
+DRAWDOWN_METHOD = "initial_capital"
+MAX_DRAWDOWN_PCT = 0.25  # Block new entries when drawdown exceeds 25%
 
 
 def risk_gate(order, portfolio, market):
-    if portfolio.drawdown > 0.10:
-        return {"approved": False, "reason": "Drawdown exceeds 10%"}
+    # Always allow closing positions (sell when long)
+    if order.get("side") == "sell":
+        symbol = order.get("symbol", "")
+        pos = portfolio.positions.get(symbol)
+        if pos and pos.quantity > 0:
+            return {"approved": True, "reason": ""}
+
+    # Calculate drawdown based on configured method
+    if DRAWDOWN_METHOD == "high_water_mark":
+        drawdown = portfolio.drawdown  # (HWM - equity) / HWM
+    else:
+        initial = portfolio.initial_capital
+        drawdown = (initial - portfolio.equity) / initial if initial > 0 else 0
+
+    if drawdown > MAX_DRAWDOWN_PCT:
+        return {"approved": False, "reason": f"Drawdown {drawdown*100:.1f}% exceeds {MAX_DRAWDOWN_PCT*100:.0f}% limit ({DRAWDOWN_METHOD})"}
+
     return {"approved": True, "reason": ""}
 `;
 

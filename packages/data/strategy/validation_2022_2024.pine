@@ -1,19 +1,22 @@
 //@version=5
-strategy("MA Crossover - AegisTrader",
+// AegisTrader Validation Script — Run 3193ef95 (AAPL, 2022-01-01 to 2024-12-31, $100K)
+// Apply to AAPL daily chart. Set Properties > Date Range: 2022-01-01 to 2024-12-31
+// Compare TradingView's Performance Summary with AegisTrader metrics:
+//   AegisTrader: 8 round-trips, +17.8% return, 37.5% win rate, PF 3.40, MaxDD 14.6%
+strategy("AegisTrader Validation — MA Crossover Long-Only",
      overlay=true,
-     initial_capital=1000000,
+     initial_capital=100000,
      default_qty_type=strategy.percent_of_equity,
      default_qty_value=50,
      commission_type=strategy.commission.cash_per_contract,
      commission_value=0.01,
      slippage=1,
-     process_orders_on_close=false)  // Fill on next bar open (matches AegisTrader engine)
+     process_orders_on_close=false)  // Fill on next bar open (matches AegisTrader)
 
-// Parameters matching AegisTrader config
+// Parameters
 fast_length = input.int(20, "Fast SMA Length")
 slow_length = input.int(50, "Slow SMA Length")
-max_drawdown_pct = input.float(25.0, "Max Drawdown %")
-drawdown_method = input.string("initial_capital", "Drawdown Method", options=["initial_capital", "high_water_mark"])
+max_drawdown_pct = input.float(10.0, "Max Drawdown %")
 
 // Calculate SMAs
 sma_fast = ta.sma(close, fast_length)
@@ -27,15 +30,13 @@ plot(sma_slow, "SMA 50", color=color.orange, linewidth=2)
 bull_cross = ta.crossover(sma_fast, sma_slow)
 bear_cross = ta.crossunder(sma_fast, sma_slow)
 
-// Drawdown risk gate — method is user-configurable
+// Drawdown risk gate
 var float high_water_mark = strategy.initial_capital
 high_water_mark := math.max(high_water_mark, strategy.equity)
-current_drawdown = drawdown_method == "high_water_mark"
-     ? (high_water_mark > 0 ? (high_water_mark - strategy.equity) / high_water_mark : 0.0)
-     : (strategy.initial_capital > 0 ? (strategy.initial_capital - strategy.equity) / strategy.initial_capital : 0.0)
+current_drawdown = high_water_mark > 0 ? (high_water_mark - strategy.equity) / high_water_mark : 0.0
 risk_ok = current_drawdown < (max_drawdown_pct / 100.0)
 
-// Long-only strategy: buy on bullish cross, close on bearish cross
+// Long-only: buy on bullish cross, close on bearish cross
 if bull_cross and risk_ok
     strategy.entry("Long", strategy.long)
 
@@ -43,8 +44,8 @@ if bear_cross
     strategy.close("Long")
 
 // Visual signals
-plotshape(bull_cross and risk_ok, "Buy Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
-plotshape(bear_cross and risk_ok, "Sell Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+plotshape(bull_cross and risk_ok, "Buy", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(bear_cross, "Sell", shape.triangledown, location.abovebar, color.red, size=size.small)
 
-// Drawdown warning background
+// Drawdown background
 bgcolor(current_drawdown >= (max_drawdown_pct / 100.0) ? color.new(color.red, 90) : na)
