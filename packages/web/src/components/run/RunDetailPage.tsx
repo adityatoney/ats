@@ -202,7 +202,10 @@ export function RunDetailPage() {
         </div>
 
         {activeTab === 'overview' && (
-          <EquityCurve snapshots={(portfolio as Array<Record<string, unknown>>) || []} />
+          <EquityCurve
+            snapshots={(portfolio as Array<Record<string, unknown>>) || []}
+            orders={(orders as Array<Record<string, unknown>>) || []}
+          />
         )}
         {activeTab === 'trades' && (
           <TradeLedger orders={(orders as Array<Record<string, unknown>>) || []} />

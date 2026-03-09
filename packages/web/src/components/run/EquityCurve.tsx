@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'react';
-import { createChart, type IChartApi } from 'lightweight-charts';
+import { createChart, type IChartApi, type ISeriesApi, type SeriesMarker, type Time } from 'lightweight-charts';
 
 interface Props {
   snapshots: Array<Record<string, unknown>>;
+  orders?: Array<Record<string, unknown>>;
 }
 
 function parseDate(ts: string): { year: number; month: number; day: number } | null {
@@ -19,7 +20,7 @@ function formatCurrency(value: number): string {
   return `$${value.toFixed(0)}`;
 }
 
-export function EquityCurve({ snapshots }: Props) {
+export function EquityCurve({ snapshots, orders }: Props) {
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstanceRef = useRef<IChartApi | null>(null);
 
@@ -94,6 +95,64 @@ export function EquityCurve({ snapshots }: Props) {
       );
 
     lineSeries.setData(data as Array<{ time: string; value: number }>);
+
+    // Build markers for buy/sell orders on the equity curve
+    if (orders && orders.length > 0) {
+      // Build sorted array of [barIndex, time] from snapshots for nearest-match lookup
+      const snapshotBars: Array<{ bar: number; time: string }> = [];
+      for (const s of snapshots) {
+        const barIdx = s.barIndex as number;
+        if (hasTimestamps && s.timestampSimulated) {
+          const date = parseDate(s.timestampSimulated as string);
+          if (date) {
+            snapshotBars.push({
+              bar: barIdx,
+              time: `${date.year}-${String(date.month).padStart(2, '0')}-${String(date.day).padStart(2, '0')}`,
+            });
+          }
+        } else {
+          snapshotBars.push({ bar: barIdx, time: String(barIdx + 1) });
+        }
+      }
+      snapshotBars.sort((a, b) => a.bar - b.bar);
+
+      // Find the nearest snapshot time for a given barIndex
+      function findNearestTime(barIdx: number): string | null {
+        if (snapshotBars.length === 0) return null;
+        let lo = 0, hi = snapshotBars.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (snapshotBars[mid].bar < barIdx) lo = mid + 1;
+          else hi = mid;
+        }
+        // lo is the first bar >= barIdx; check lo and lo-1 for nearest
+        if (lo > 0 && Math.abs(snapshotBars[lo - 1].bar - barIdx) <= Math.abs(snapshotBars[lo].bar - barIdx)) {
+          return snapshotBars[lo - 1].time;
+        }
+        return snapshotBars[lo].time;
+      }
+
+      const markers: SeriesMarker<Time>[] = orders
+        .map((order) => {
+          const barIdx = order.barIndex as number;
+          const side = order.side as string;
+          const time = findNearestTime(barIdx);
+          if (!time) return null;
+
+          return {
+            time: time as Time,
+            position: side === 'buy' ? 'belowBar' as const : 'aboveBar' as const,
+            color: side === 'buy' ? '#22c55e' : '#ef4444',
+            shape: side === 'buy' ? 'arrowUp' as const : 'arrowDown' as const,
+            text: side === 'buy' ? 'B' : 'S',
+          };
+        })
+        .filter((m): m is SeriesMarker<Time> => m !== null)
+        .sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+
+      lineSeries.setMarkers(markers);
+    }
+
     chart.timeScale().fitContent();
 
     const handleResize = () => {

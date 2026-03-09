@@ -278,6 +278,7 @@ class Engine:
                                     "order_type": order.order_type.value,
                                     "quantity": order.quantity,
                                     "bar_index": bar_idx,
+                                    "timestamp": bar_timestamp,
                                     "status": "pending",
                                 }
                                 self.all_orders.append(order_record)

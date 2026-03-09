@@ -39,6 +39,7 @@ webhookRoutes.post('/runtime-event', async (c) => {
       quantity: String(payload.quantity),
       status: 'pending',
       barIndex: payload.bar_index ?? 0,
+      submittedAtSim: payload.timestamp ? new Date(payload.timestamp) : null,
     });
   } else if (eventType === 'order.filled') {
     // Try to find and update the matching pending order
@@ -52,9 +53,10 @@ webhookRoutes.post('/runtime-event', async (c) => {
     });
 
     if (pendingOrder) {
+      const filledAtSim = payload.timestamp ? new Date(payload.timestamp) : null;
       await db
         .update(orders)
-        .set({ status: 'filled', barIndex: payload.bar_index ?? pendingOrder.barIndex })
+        .set({ status: 'filled', barIndex: payload.bar_index ?? pendingOrder.barIndex, filledAtSim })
         .where(eq(orders.id, pendingOrder.id));
 
       await db.insert(fills).values({
@@ -64,9 +66,11 @@ webhookRoutes.post('/runtime-event', async (c) => {
         fillQuantity: String(payload.quantity),
         fee: String(payload.fee ?? 0),
         slippage: String(payload.slippage ?? 0),
+        filledAtSim,
       });
     } else {
       // No matching pending order found — insert as filled directly
+      const filledAt = payload.timestamp ? new Date(payload.timestamp) : null;
       const [newOrder] = await db
         .insert(orders)
         .values({
@@ -77,6 +81,8 @@ webhookRoutes.post('/runtime-event', async (c) => {
           quantity: String(payload.quantity),
           status: 'filled',
           barIndex: payload.bar_index ?? 0,
+          submittedAtSim: filledAt,
+          filledAtSim: filledAt,
         })
         .returning();
 
@@ -87,6 +93,7 @@ webhookRoutes.post('/runtime-event', async (c) => {
         fillQuantity: String(payload.quantity),
         fee: String(payload.fee ?? 0),
         slippage: String(payload.slippage ?? 0),
+        filledAtSim: filledAt,
       });
     }
   } else if (eventType === 'run.progress') {

@@ -46,9 +46,29 @@ runRoutes.get('/:id/events', async (c) => {
 
 runRoutes.get('/:id/orders', async (c) => {
   const id = c.req.param('id');
-  const orderList = await db.query.orders.findMany({
-    where: eq(orders.runId, id),
-  });
+  const orderList = await db
+    .select({
+      id: orders.id,
+      runId: orders.runId,
+      symbol: orders.symbol,
+      side: orders.side,
+      orderType: orders.orderType,
+      quantity: orders.quantity,
+      limitPrice: orders.limitPrice,
+      stopPrice: orders.stopPrice,
+      status: orders.status,
+      submittedAtSim: orders.submittedAtSim,
+      filledAtSim: orders.filledAtSim,
+      barIndex: orders.barIndex,
+      createdAt: orders.createdAt,
+      fillPrice: fills.fillPrice,
+      fee: fills.fee,
+      slippage: fills.slippage,
+    })
+    .from(orders)
+    .leftJoin(fills, eq(fills.orderId, orders.id))
+    .where(eq(orders.runId, id))
+    .orderBy(orders.barIndex);
   return c.json({ data: orderList });
 });
 
