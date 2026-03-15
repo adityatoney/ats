@@ -5,6 +5,7 @@ from datetime import datetime
 
 import polars as pl
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.enums import Adjustment
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
@@ -37,7 +38,7 @@ def _fetch_yfinance(symbol: str, start: str, end: str, timeframe: str) -> pl.Dat
 
         yf_interval = YF_TIMEFRAME_MAP.get(timeframe, "1d")
         ticker = yf.Ticker(symbol)
-        df = ticker.history(start=start, end=end, interval=yf_interval)
+        df = ticker.history(start=start, end=end, interval=yf_interval, auto_adjust=False)
 
         if df.empty:
             return None
@@ -88,6 +89,9 @@ class AlpacaHistoricalClient:
         requested_start = datetime.fromisoformat(start).date()
 
         for symbol in symbols:
+            df = None
+            alpaca_ok = False
+
             for attempt in range(max_retries):
                 try:
                     request = StockBarsRequest(
@@ -95,6 +99,7 @@ class AlpacaHistoricalClient:
                         start=start,
                         end=end,
                         timeframe=tf,
+                        adjustment=Adjustment.SPLIT,
                     )
                     bars = self.client.get_stock_bars(request)
 
@@ -112,28 +117,14 @@ class AlpacaHistoricalClient:
 
                     df = pl.DataFrame(records)
                     df = df.sort("timestamp")
+                    alpaca_ok = True
+                    break
 
-                    # Check if Alpaca returned data covering the full requested range
-                    if len(df) > 0:
-                        actual_start = df["timestamp"][0].date()
-                        if actual_start > requested_start:
-                            logger.warning(
-                                f"Alpaca data for {symbol} starts at {actual_start}, "
-                                f"requested {requested_start}. Trying Yahoo Finance fallback..."
-                            )
-                            yf_df = _fetch_yfinance(symbol, start, end, timeframe)
-                            if yf_df is not None and len(yf_df) > len(df):
-                                logger.info(
-                                    f"Using Yahoo Finance data for {symbol}: "
-                                    f"{len(yf_df)} bars (vs Alpaca's {len(df)})"
-                                )
-                                df = yf_df
-
-                    result[symbol] = df
-                    logger.info(
-                        f"Fetched {len(df)} bars for {symbol} "
-                        f"({df['timestamp'][0]} to {df['timestamp'][-1]})"
-                        if len(df) > 0 else f"No bars for {symbol}"
+                except KeyError:
+                    # Alpaca has no data for this symbol/range — skip retries
+                    logger.warning(
+                        f"Alpaca has no data for {symbol} ({start} to {end}), "
+                        f"trying Yahoo Finance fallback..."
                     )
                     break
 
@@ -145,5 +136,38 @@ class AlpacaHistoricalClient:
                         time.sleep(2 ** attempt)
                     else:
                         raise
+
+            # Check if Alpaca data covers the full requested range
+            if alpaca_ok and df is not None and len(df) > 0:
+                actual_start = df["timestamp"][0].date()
+                if actual_start > requested_start:
+                    logger.warning(
+                        f"Alpaca data for {symbol} starts at {actual_start}, "
+                        f"requested {requested_start}. Trying Yahoo Finance fallback..."
+                    )
+                    yf_df = _fetch_yfinance(symbol, start, end, timeframe)
+                    if yf_df is not None and len(yf_df) > len(df):
+                        logger.info(
+                            f"Using Yahoo Finance data for {symbol}: "
+                            f"{len(yf_df)} bars (vs Alpaca's {len(df)})"
+                        )
+                        df = yf_df
+            elif not alpaca_ok or df is None or len(df) == 0:
+                # Alpaca returned no data at all — try Yahoo Finance
+                yf_df = _fetch_yfinance(symbol, start, end, timeframe)
+                if yf_df is not None and len(yf_df) > 0:
+                    logger.info(
+                        f"Using Yahoo Finance data for {symbol}: {len(yf_df)} bars"
+                    )
+                    df = yf_df
+                else:
+                    raise ValueError(f"No data available for {symbol} from any source")
+
+            result[symbol] = df
+            logger.info(
+                f"Fetched {len(df)} bars for {symbol} "
+                f"({df['timestamp'][0]} to {df['timestamp'][-1]})"
+                if len(df) > 0 else f"No bars for {symbol}"
+            )
 
         return result

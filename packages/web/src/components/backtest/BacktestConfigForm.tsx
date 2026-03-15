@@ -12,7 +12,7 @@ export function BacktestConfigForm() {
   const today = new Date().toISOString().split('T')[0];
   const [config, setConfig] = useState({
     symbols: 'AAPL',
-    startDate: '1980-12-12',
+    startDate: '2006-05-01',
     endDate: today,
     timeframe: '1Day',
     initialCapital: 100000,
