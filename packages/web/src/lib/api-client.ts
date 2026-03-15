@@ -76,4 +76,23 @@ export const api = {
     request(`/souls/agent/${agentId}/${versionId}/approve`, { method: 'POST' }),
   generateSoul: (runId: string) =>
     request(`/runs/${runId}/generate-soul`, { method: 'POST' }),
+
+  // Tournaments
+  listTournaments: (projectId?: string) =>
+    request(`/tournaments${projectId ? `?projectId=${projectId}` : ''}`),
+  createTournament: (data: {
+    projectId: string;
+    name: string;
+    agentIds: string[];
+    config: Record<string, unknown>;
+  }) => request('/tournaments', { method: 'POST', body: JSON.stringify(data) }),
+  getTournament: (id: string) => request(`/tournaments/${id}`),
+  startTournament: (id: string) =>
+    request(`/tournaments/${id}/start`, { method: 'POST' }),
+  cancelTournament: (id: string) =>
+    request(`/tournaments/${id}/cancel`, { method: 'POST' }),
+  getTournamentLeaderboard: (id: string) =>
+    request(`/tournaments/${id}/leaderboard`),
+  getTournamentComparison: (id: string) =>
+    request(`/tournaments/${id}/comparison`),
 };

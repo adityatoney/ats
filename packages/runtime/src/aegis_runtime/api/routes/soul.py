@@ -17,6 +17,7 @@ NODE_SERVER_URL = os.getenv("NODE_SERVER_URL", "http://localhost:3001")
 class GenerateSoulRequest(BaseModel):
     runId: str
     agentId: str
+    competitiveContext: dict[str, Any] | None = None
 
 
 async def send_event(run_id: str, event_type: str, payload: dict[str, Any]):
@@ -69,7 +70,10 @@ async def generate_soul_task(request: GenerateSoulRequest):
             "portfolioSnapshots": portfolio_data[-10:] if portfolio_data else [],
         }
 
-        artifacts = await generator.generate(run_summary)
+        if request.competitiveContext:
+            artifacts = await generator.generate_competitive(run_summary, request.competitiveContext)
+        else:
+            artifacts = await generator.generate(run_summary)
 
         await send_event(request.runId, "soul.generated", {
             "soulMd": artifacts.soul_md,

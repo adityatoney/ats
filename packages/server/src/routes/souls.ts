@@ -2,10 +2,11 @@ import { Hono } from 'hono';
 import { eq, desc, and } from 'drizzle-orm';
 import { db } from '../lib/db';
 import { soulVersions } from '@aegis/db/schema';
+import { agentIsolation } from '../middleware/agent-isolation';
 
 export const soulRoutes = new Hono();
 
-soulRoutes.get('/agent/:agentId', async (c) => {
+soulRoutes.get('/agent/:agentId', agentIsolation('soul'), async (c) => {
   const agentId = c.req.param('agentId');
   const activeSoul = await db.query.soulVersions.findFirst({
     where: and(eq(soulVersions.agentId, agentId), eq(soulVersions.status, 'active')),
@@ -16,7 +17,7 @@ soulRoutes.get('/agent/:agentId', async (c) => {
   return c.json({ data: activeSoul });
 });
 
-soulRoutes.get('/agent/:agentId/versions', async (c) => {
+soulRoutes.get('/agent/:agentId/versions', agentIsolation('soul'), async (c) => {
   const agentId = c.req.param('agentId');
   const versions = await db.query.soulVersions.findMany({
     where: eq(soulVersions.agentId, agentId),

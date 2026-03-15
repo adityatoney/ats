@@ -9,6 +9,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import { agents } from './agents';
 import { strategyVersions } from './strategy-versions';
+import { tournaments } from './tournaments';
 
 export const runs = pgTable('runs', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -18,6 +19,7 @@ export const runs = pgTable('runs', {
   strategyVersionId: uuid('strategy_version_id')
     .references(() => strategyVersions.id)
     .notNull(),
+  tournamentId: uuid('tournament_id').references(() => tournaments.id),
   branchId: uuid('branch_id'),
   status: varchar('status', { length: 50 }).notNull().default('pending'),
   runType: varchar('run_type', { length: 50 }).notNull().default('backtest'),

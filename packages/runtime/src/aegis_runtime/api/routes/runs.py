@@ -82,8 +82,8 @@ async def run_backtest(request: StartRunRequest):
         # Create engine
         engine_config = EngineConfig(
             initial_capital=config.get("initialCapital", 100000),
-            slippage_bps=config.get("slippageBps", 5),
-            fee_per_share=config.get("feePerShare", 0.01),
+            slippage_bps=config.get("slippageBps", 0),
+            fee_per_share=config.get("feePerShare", 0),
             fee_percentage=config.get("feePercentage", 0),
             seed=config.get("seed", 42),
             checkpoint_interval=config.get("checkpointInterval", 50),
@@ -140,8 +140,8 @@ async def run_branch(request: StartBranchRequest):
 
         engine_config = EngineConfig(
             initial_capital=config.get("initialCapital", 100000),
-            slippage_bps=config.get("slippageBps", 5),
-            fee_per_share=config.get("feePerShare", 0.01),
+            slippage_bps=config.get("slippageBps", 0),
+            fee_per_share=config.get("feePerShare", 0),
             fee_percentage=config.get("feePercentage", 0),
             seed=config.get("seed", 42),
             checkpoint_interval=config.get("checkpointInterval", 50),

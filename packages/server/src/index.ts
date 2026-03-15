@@ -10,6 +10,7 @@ import { branchRoutes } from './routes/branches';
 import { soulRoutes } from './routes/souls';
 import { sseRoutes } from './routes/events-sse';
 import { webhookRoutes } from './routes/webhooks';
+import { tournamentRoutes } from './routes/tournaments';
 
 const app = new Hono();
 
@@ -26,6 +27,7 @@ app.route('/api/branches', branchRoutes);
 app.route('/api/souls', soulRoutes);
 app.route('/api/events', sseRoutes);
 app.route('/api/webhooks', webhookRoutes);
+app.route('/api/tournaments', tournamentRoutes);
 
 const port = parseInt(process.env.PORT || '3001', 10);
 

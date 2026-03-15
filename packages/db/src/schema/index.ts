@@ -11,3 +11,6 @@ export * from './fills';
 export * from './positions';
 export * from './portfolio-snapshots';
 export * from './agent-events';
+export * from './tournaments';
+export * from './tournament-entries';
+export * from './leaderboard-entries';

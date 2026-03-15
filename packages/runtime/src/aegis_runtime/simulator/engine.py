@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EngineConfig:
     initial_capital: float = 100000.0
-    slippage_bps: float = 5.0
-    fee_per_share: float = 0.01
+    slippage_bps: float = 0.0
+    fee_per_share: float = 0.0
     fee_percentage: float = 0.0
     seed: int = 42
     checkpoint_interval: int = 50
@@ -284,8 +284,9 @@ class Engine:
                                 self.all_orders.append(order_record)
                                 await self._emit_event("order.submitted", order_record)
 
-            # 5. Record snapshot
+            # 5. Record snapshot (include all symbol prices for charting)
             snapshot = self.portfolio.snapshot(bar_idx, str(current_prices))
+            snapshot["prices_json"] = dict(current_prices)
             self.snapshots.append(snapshot)
 
             # 6. Checkpoint if interval
@@ -308,7 +309,14 @@ class Engine:
                     "drawdown": self.portfolio.drawdown,
                     "highWaterMark": round(self.portfolio.high_water_mark, 8),
                     "positionsJson": {
-                        s: p.to_dict() for s, p in self.portfolio.positions.items()
+                        **{s: p.to_dict() for s, p in self.portfolio.positions.items()},
+                        # Include price tracking for symbols not currently held
+                        **{
+                            s: {"symbol": s, "quantity": 0, "avg_entry_price": 0,
+                                "current_price": current_prices.get(s, 0),
+                                "market_value": 0, "unrealized_pnl": 0, "realized_pnl": 0}
+                            for s in symbols if s not in self.portfolio.positions
+                        },
                     },
                 })
 

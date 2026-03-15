@@ -3,6 +3,7 @@ import { eq, desc, asc } from 'drizzle-orm';
 import { db } from '../lib/db';
 import { runs, orders, fills, portfolioSnapshots, agentEvents, checkpoints } from '@aegis/db/schema';
 import { runManager } from '../services/run-manager';
+import { agentIsolation } from '../middleware/agent-isolation';
 
 export const runRoutes = new Hono();
 
@@ -14,16 +15,16 @@ runRoutes.post('/', async (c) => {
     endDate: body.endDate,
     timeframe: body.timeframe || '1Day',
     initialCapital: body.initialCapital || 100000,
-    slippageBps: body.slippageBps || 5,
-    feePerShare: body.feePerShare || 0.01,
-    feePercentage: body.feePercentage || 0,
+    slippageBps: body.slippageBps ?? 0,
+    feePerShare: body.feePerShare ?? 0,
+    feePercentage: body.feePercentage ?? 0,
     seed: body.seed || 42,
     checkpointInterval: body.checkpointInterval || 50,
   });
   return c.json({ data: run }, 201);
 });
 
-runRoutes.get('/:id', async (c) => {
+runRoutes.get('/:id', agentIsolation('run'), async (c) => {
   const id = c.req.param('id');
   const run = await db.query.runs.findFirst({ where: eq(runs.id, id) });
   if (!run) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
@@ -44,7 +45,7 @@ runRoutes.get('/:id/events', async (c) => {
   return c.json({ data: events });
 });
 
-runRoutes.get('/:id/orders', async (c) => {
+runRoutes.get('/:id/orders', agentIsolation('run'), async (c) => {
   const id = c.req.param('id');
   const orderList = await db
     .select({
@@ -72,7 +73,7 @@ runRoutes.get('/:id/orders', async (c) => {
   return c.json({ data: orderList });
 });
 
-runRoutes.get('/:id/portfolio', async (c) => {
+runRoutes.get('/:id/portfolio', agentIsolation('run'), async (c) => {
   const id = c.req.param('id');
   const snapshots = await db.query.portfolioSnapshots.findMany({
     where: eq(portfolioSnapshots.runId, id),
@@ -114,6 +115,17 @@ runRoutes.post('/:id/generate-soul', async (c) => {
   if (!run) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
 
   const { pythonClient } = await import('../lib/python-client');
-  await pythonClient.generateSoul({ runId: id, agentId: run.agentId });
+
+  // If run is part of a tournament, include competitive context
+  let competitiveContext: Record<string, unknown> | undefined;
+  if (run.tournamentId) {
+    const { leaderboardService } = await import('../services/leaderboard-service');
+    const standing = await leaderboardService.getAgentStanding(run.tournamentId, run.agentId);
+    if (standing) {
+      competitiveContext = standing;
+    }
+  }
+
+  await pythonClient.generateSoul({ runId: id, agentId: run.agentId, competitiveContext });
   return c.json({ data: { status: 'generating' } });
 });

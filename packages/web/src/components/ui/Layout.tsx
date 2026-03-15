@@ -8,8 +8,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
           <Link to="/" className="text-xl font-bold text-white">
             AegisTrader
           </Link>
-          <div className="flex items-center gap-4 text-sm text-gray-400">
-            <span>Phase 1 - Local Dev</span>
+          <div className="flex items-center gap-6 text-sm">
+            <Link to="/" className="text-gray-400 hover:text-gray-200 transition-colors">
+              Dashboard
+            </Link>
+            <Link to="/tournaments" className="text-gray-400 hover:text-gray-200 transition-colors">
+              Tournaments
+            </Link>
+            <span className="text-gray-600">Phase 2</span>
           </div>
         </div>
       </nav>

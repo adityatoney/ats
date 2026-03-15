@@ -139,6 +139,12 @@ webhookRoutes.post('/runtime-event', async (c) => {
     const run = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
     if (run) {
       await db.update(agents).set({ status: 'idle' }).where(eq(agents.id, run.agentId));
+
+      // Tournament handling
+      if (run.tournamentId) {
+        const { tournamentManager } = await import('../services/tournament-manager');
+        await tournamentManager.handleRunCompleted(runId, run.tournamentId);
+      }
     }
   } else if (eventType === 'run.failed') {
     await db
@@ -153,6 +159,12 @@ webhookRoutes.post('/runtime-event', async (c) => {
     const run = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
     if (run) {
       await db.update(agents).set({ status: 'idle' }).where(eq(agents.id, run.agentId));
+
+      // Tournament handling
+      if (run.tournamentId) {
+        const { tournamentManager } = await import('../services/tournament-manager');
+        await tournamentManager.handleRunFailed(runId, run.tournamentId);
+      }
     }
   } else if (eventType === 'soul.generated') {
     const run = await db.query.runs.findFirst({ where: eq(runs.id, runId) });

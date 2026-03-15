@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { eq, desc } from 'drizzle-orm';
 import { db } from '../lib/db';
 import { agents, strategyVersions, soulVersions, runs } from '@aegis/db/schema';
+import { agentIsolation } from '../middleware/agent-isolation';
 
 export const agentRoutes = new Hono();
 
@@ -12,7 +13,7 @@ agentRoutes.get('/', async (c) => {
   return c.json({ data: allAgents });
 });
 
-agentRoutes.get('/:id', async (c) => {
+agentRoutes.get('/:id', agentIsolation('agent'), async (c) => {
   const id = c.req.param('id');
   const agent = await db.query.agents.findFirst({
     where: eq(agents.id, id),
@@ -38,7 +39,7 @@ agentRoutes.get('/:id', async (c) => {
   });
 });
 
-agentRoutes.get('/:id/runs', async (c) => {
+agentRoutes.get('/:id/runs', agentIsolation('agent'), async (c) => {
   const id = c.req.param('id');
   const agentRuns = await db.query.runs.findMany({
     where: eq(runs.agentId, id),

@@ -54,6 +54,23 @@ class EventBus extends EventEmitter {
     this.on(`run:${runId}`, handler);
     return () => this.off(`run:${runId}`, handler);
   }
+
+  publishTournament(
+    tournamentId: string,
+    event: { eventType: string; payload: Record<string, unknown> },
+  ) {
+    const fullEvent = { tournamentId, ...event };
+    this.emit(`tournament:${tournamentId}`, fullEvent);
+    this.emit('tournament:*', fullEvent);
+  }
+
+  subscribeToTournament(
+    tournamentId: string,
+    handler: (event: { tournamentId: string; eventType: string; payload: Record<string, unknown> }) => void,
+  ) {
+    this.on(`tournament:${tournamentId}`, handler);
+    return () => this.off(`tournament:${tournamentId}`, handler);
+  }
 }
 
 export const eventBus = new EventBus();

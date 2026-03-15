@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react';
-import { createChart, type IChartApi, type ISeriesApi, type SeriesMarker, type Time } from 'lightweight-charts';
+import { useEffect, useRef, useState } from 'react';
+import { createChart, type IChartApi, type SeriesMarker, type Time } from 'lightweight-charts';
 
 interface Props {
   snapshots: Array<Record<string, unknown>>;
@@ -12,15 +12,162 @@ function parseDate(ts: string): { year: number; month: number; day: number } | n
   return { year: parseInt(match[1]), month: parseInt(match[2]), day: parseInt(match[3]) };
 }
 
+function toDateStr(date: { year: number; month: number; day: number }): string {
+  return `${date.year}-${String(date.month).padStart(2, '0')}-${String(date.day).padStart(2, '0')}`;
+}
+
 function formatCurrency(value: number): string {
   const abs = Math.abs(value);
   if (abs >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`;
   if (abs >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
   if (abs >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
-  return `$${value.toFixed(0)}`;
+  return `$${value.toFixed(2)}`;
+}
+
+// Consistent symbol color palette
+const SYMBOL_COLORS: Record<string, { line: string; buy: string; sell: string }> = {};
+const COLOR_PALETTE = [
+  { line: '#3B82F6', buy: '#22d3ee', sell: '#f472b6' },   // blue / cyan / pink
+  { line: '#F59E0B', buy: '#34d399', sell: '#fb923c' },   // amber / emerald / orange
+  { line: '#8B5CF6', buy: '#a3e635', sell: '#f87171' },   // violet / lime / red
+  { line: '#EC4899', buy: '#2dd4bf', sell: '#fbbf24' },   // pink / teal / yellow
+  { line: '#10B981', buy: '#60a5fa', sell: '#e879f9' },   // emerald / blue / fuchsia
+];
+
+function getSymbolColors(symbol: string, index: number) {
+  if (!SYMBOL_COLORS[symbol]) {
+    SYMBOL_COLORS[symbol] = COLOR_PALETTE[index % COLOR_PALETTE.length];
+  }
+  return SYMBOL_COLORS[symbol];
+}
+
+/** Extract unique symbols from snapshots positionsJson */
+function extractSymbols(snapshots: Array<Record<string, unknown>>): string[] {
+  const symbols = new Set<string>();
+  for (const s of snapshots) {
+    const positions = s.positionsJson as Record<string, unknown> | null;
+    if (positions) {
+      for (const sym of Object.keys(positions)) {
+        symbols.add(sym);
+      }
+    }
+  }
+  return Array.from(symbols).sort();
+}
+
+/** Build the equity data series */
+function buildEquityData(snapshots: Array<Record<string, unknown>>): Array<{ time: string; value: number }> {
+  const hasTimestamps = snapshots.some(
+    (s) => s.timestampSimulated && typeof s.timestampSimulated === 'string',
+  );
+
+  const raw = snapshots.map((s) => {
+    const equity = Number(s.equity) || 0;
+    if (hasTimestamps && s.timestampSimulated) {
+      const date = parseDate(s.timestampSimulated as string);
+      if (date) return { time: toDateStr(date), value: equity };
+    }
+    return { time: String((s.barIndex as number) + 1), value: equity };
+  });
+
+  // Deduplicate
+  const deduped: Array<{ time: string; value: number }> = [];
+  const seen = new Map<string, number>();
+  for (const point of raw) {
+    const idx = seen.get(point.time);
+    if (idx !== undefined) {
+      deduped[idx] = point;
+    } else {
+      seen.set(point.time, deduped.length);
+      deduped.push(point);
+    }
+  }
+  return deduped;
+}
+
+/** Extract time from order's filledAtSim or submittedAtSim timestamp */
+function getOrderTime(order: Record<string, unknown>): string | null {
+  const ts = (order.filledAtSim as string) || (order.submittedAtSim as string);
+  if (!ts) return null;
+  const date = parseDate(ts);
+  if (!date) return null;
+  return toDateStr(date);
 }
 
 export function EquityCurve({ snapshots, orders }: Props) {
+  const symbols = extractSymbols(snapshots);
+  const isMultiSymbol = symbols.length > 1;
+
+  const [visibleSymbols, setVisibleSymbols] = useState<Set<string>>(new Set(symbols));
+
+  // Reset visible symbols when symbols change
+  useEffect(() => {
+    setVisibleSymbols(new Set(symbols));
+  }, [symbols.join(',')]);
+
+  const toggleSymbol = (sym: string) => {
+    setVisibleSymbols((prev) => {
+      const next = new Set(prev);
+      if (next.has(sym)) {
+        if (next.size > 1) next.delete(sym);
+      } else {
+        next.add(sym);
+      }
+      return next;
+    });
+  };
+
+  if (snapshots.length === 0) {
+    return <div className="text-gray-400">No portfolio data yet.</div>;
+  }
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-medium text-gray-300">Portfolio Equity</h3>
+        {isMultiSymbol && (
+          <div className="flex items-center gap-2">
+            {symbols.map((sym, i) => {
+              const colors = getSymbolColors(sym, i);
+              const active = visibleSymbols.has(sym);
+              return (
+                <button
+                  key={sym}
+                  onClick={() => toggleSymbol(sym)}
+                  className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium transition-all ${
+                    active
+                      ? 'bg-gray-800 text-gray-100'
+                      : 'bg-gray-900 text-gray-500 opacity-50'
+                  }`}
+                >
+                  <span
+                    className="w-2.5 h-2.5 rounded-sm"
+                    style={{ backgroundColor: active ? colors.line : '#4B5563' }}
+                  />
+                  {sym}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      <EquityChart snapshots={snapshots} orders={orders} symbols={symbols} visibleSymbols={visibleSymbols} />
+    </div>
+  );
+}
+
+/** Main equity curve chart */
+function EquityChart({
+  snapshots,
+  orders,
+  symbols,
+  visibleSymbols,
+}: {
+  snapshots: Array<Record<string, unknown>>;
+  orders?: Array<Record<string, unknown>>;
+  symbols: string[];
+  visibleSymbols: Set<string>;
+}) {
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstanceRef = useRef<IChartApi | null>(null);
 
@@ -32,119 +179,39 @@ export function EquityCurve({ snapshots, orders }: Props) {
     }
 
     const chart = createChart(chartRef.current, {
-      layout: {
-        background: { color: '#111827' },
-        textColor: '#9CA3AF',
-      },
-      grid: {
-        vertLines: { color: '#1F2937' },
-        horzLines: { color: '#1F2937' },
-      },
+      layout: { background: { color: '#111827' }, textColor: '#9CA3AF' },
+      grid: { vertLines: { color: '#1F2937' }, horzLines: { color: '#1F2937' } },
       width: chartRef.current.clientWidth,
       height: 400,
-      timeScale: {
-        timeVisible: false,
-        borderColor: '#374151',
-      },
-      rightPriceScale: {
-        borderColor: '#374151',
-      },
-      localization: {
-        priceFormatter: formatCurrency,
-      },
+      timeScale: { timeVisible: false, borderColor: '#374151' },
+      rightPriceScale: { borderColor: '#374151' },
+      localization: { priceFormatter: formatCurrency },
     });
-
     chartInstanceRef.current = chart;
 
-    const lineSeries = chart.addLineSeries({
-      color: '#3B82F6',
-      lineWidth: 2,
-    });
+    const equityData = buildEquityData(snapshots);
+    const lineSeries = chart.addLineSeries({ color: '#3B82F6', lineWidth: 2 });
+    lineSeries.setData(equityData as Array<{ time: string; value: number }>);
 
-    // Check if snapshots have real timestamps
-    const hasTimestamps = snapshots.some(
-      (s) => s.timestampSimulated && typeof s.timestampSimulated === 'string',
-    );
-
-    const data = snapshots
-      .map((s) => {
-        const equity = Number(s.equity) || 0;
-
-        if (hasTimestamps && s.timestampSimulated) {
-          const date = parseDate(s.timestampSimulated as string);
-          if (date) {
-            return { time: `${date.year}-${String(date.month).padStart(2, '0')}-${String(date.day).padStart(2, '0')}`, value: equity };
-          }
-        }
-
-        // Fallback: use bar index as sequential number
-        return { time: ((s.barIndex as number) + 1) as unknown as string, value: equity };
-      })
-      // Deduplicate by time (keep last value for each date)
-      .reduce(
-        (acc, point) => {
-          const existing = acc.findIndex((p) => p.time === point.time);
-          if (existing >= 0) {
-            acc[existing] = point;
-          } else {
-            acc.push(point);
-          }
-          return acc;
-        },
-        [] as Array<{ time: string; value: number }>,
-      );
-
-    lineSeries.setData(data as Array<{ time: string; value: number }>);
-
-    // Build markers for buy/sell orders on the equity curve
+    // Build markers for visible symbols, using order's own filledAtSim timestamp
     if (orders && orders.length > 0) {
-      // Build sorted array of [barIndex, time] from snapshots for nearest-match lookup
-      const snapshotBars: Array<{ bar: number; time: string }> = [];
-      for (const s of snapshots) {
-        const barIdx = s.barIndex as number;
-        if (hasTimestamps && s.timestampSimulated) {
-          const date = parseDate(s.timestampSimulated as string);
-          if (date) {
-            snapshotBars.push({
-              bar: barIdx,
-              time: `${date.year}-${String(date.month).padStart(2, '0')}-${String(date.day).padStart(2, '0')}`,
-            });
-          }
-        } else {
-          snapshotBars.push({ bar: barIdx, time: String(barIdx + 1) });
-        }
-      }
-      snapshotBars.sort((a, b) => a.bar - b.bar);
-
-      // Find the nearest snapshot time for a given barIndex
-      function findNearestTime(barIdx: number): string | null {
-        if (snapshotBars.length === 0) return null;
-        let lo = 0, hi = snapshotBars.length - 1;
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1;
-          if (snapshotBars[mid].bar < barIdx) lo = mid + 1;
-          else hi = mid;
-        }
-        // lo is the first bar >= barIdx; check lo and lo-1 for nearest
-        if (lo > 0 && Math.abs(snapshotBars[lo - 1].bar - barIdx) <= Math.abs(snapshotBars[lo].bar - barIdx)) {
-          return snapshotBars[lo - 1].time;
-        }
-        return snapshotBars[lo].time;
-      }
-
       const markers: SeriesMarker<Time>[] = orders
+        .filter((o) => visibleSymbols.has(o.symbol as string))
         .map((order) => {
-          const barIdx = order.barIndex as number;
           const side = order.side as string;
-          const time = findNearestTime(barIdx);
+          const sym = order.symbol as string;
+          const time = getOrderTime(order);
           if (!time) return null;
+
+          const symIdx = symbols.indexOf(sym);
+          const colors = getSymbolColors(sym, symIdx);
 
           return {
             time: time as Time,
-            position: side === 'buy' ? 'belowBar' as const : 'aboveBar' as const,
-            color: side === 'buy' ? '#22c55e' : '#ef4444',
-            shape: side === 'buy' ? 'arrowUp' as const : 'arrowDown' as const,
-            text: side === 'buy' ? 'B' : 'S',
+            position: side === 'buy' ? ('belowBar' as const) : ('aboveBar' as const),
+            color: side === 'buy' ? colors.buy : colors.sell,
+            shape: side === 'buy' ? ('arrowUp' as const) : ('arrowDown' as const),
+            text: `${side === 'buy' ? 'B' : 'S'} ${sym}`,
           };
         })
         .filter((m): m is SeriesMarker<Time> => m !== null)
@@ -156,27 +223,15 @@ export function EquityCurve({ snapshots, orders }: Props) {
     chart.timeScale().fitContent();
 
     const handleResize = () => {
-      if (chartRef.current) {
-        chart.applyOptions({ width: chartRef.current.clientWidth });
-      }
+      if (chartRef.current) chart.applyOptions({ width: chartRef.current.clientWidth });
     };
-
     window.addEventListener('resize', handleResize);
     return () => {
       window.removeEventListener('resize', handleResize);
       chart.remove();
       chartInstanceRef.current = null;
     };
-  }, [snapshots]);
+  }, [snapshots, orders, symbols, visibleSymbols]);
 
-  if (snapshots.length === 0) {
-    return <div className="text-gray-400">No portfolio data yet.</div>;
-  }
-
-  return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-      <h3 className="text-sm font-medium text-gray-300 mb-3">Equity Curve</h3>
-      <div ref={chartRef} />
-    </div>
-  );
+  return <div ref={chartRef} />;
 }

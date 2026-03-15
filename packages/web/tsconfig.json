@@ -6,7 +6,8 @@
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "declaration": false,
-    "declarationMap": false
+    "declarationMap": false,
+    "types": []
   },
   "include": ["src"]
 }

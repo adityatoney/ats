@@ -59,8 +59,37 @@ export const pythonClient = {
     });
   },
 
-  generateSoul(data: { runId: string; agentId: string }) {
+  generateSoul(data: { runId: string; agentId: string; competitiveContext?: Record<string, unknown> }) {
     return request('/api/soul/generate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  prefetchData(data: {
+    symbols: string[];
+    startDate: string;
+    endDate: string;
+    timeframe: string;
+  }) {
+    return request('/api/data/prefetch', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  startTournament(data: {
+    tournamentId: string;
+    runs: Array<{
+      runId: string;
+      agentId: string;
+      strategyMd: string;
+      strategyPy: string | null;
+      config: Record<string, unknown>;
+    }>;
+    dataSnapshotId: string;
+  }) {
+    return request('/api/tournaments/start', {
       method: 'POST',
       body: JSON.stringify(data),
     });

@@ -10,6 +10,10 @@ class SoulJson(BaseModel):
     playbooks: list[str] = []
     scar_tissue: list[str] = []
     forbidden_moves: list[str] = []
+    competitive_position: dict = {}
+    relative_strengths: list[str] = []
+    relative_weaknesses: list[str] = []
+    adaptation_hypotheses: list[str] = []
 
 
 class SoulArtifacts(BaseModel):
