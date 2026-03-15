@@ -415,16 +415,36 @@ class Engine:
                 "totalReturn": 0,
                 "annualizedReturn": 0,
                 "sharpeRatio": 0,
+                "sortinoRatio": 0,
                 "maxDrawdown": 0,
+                "maxDrawdownDollars": 0,
                 "winRate": 0,
                 "profitFactor": 0,
                 "totalTrades": 0,
                 "avgTradeReturn": 0,
+                "netProfit": 0,
+                "grossProfit": 0,
+                "grossLoss": 0,
+                "buyHoldReturn": 0,
+                "totalCommission": 0,
+                "numWinningTrades": 0,
+                "numLosingTrades": 0,
+                "avgWin": 0,
+                "avgLoss": 0,
+                "largestWin": 0,
+                "largestLoss": 0,
+                "avgBarsInTrades": 0,
+                "maxContractsHeld": 0,
+                "openPL": 0,
             }
+
+        import math
+        import statistics
 
         initial_equity = self.config.initial_capital
         final_equity = self.portfolio.equity
         total_return = round((final_equity - initial_equity) / initial_equity, 8)
+        net_profit = round(final_equity - initial_equity, 8)
 
         # Compute returns series
         equities = [s["equity"] for s in self.snapshots]
@@ -443,35 +463,70 @@ class Engine:
 
         # Sharpe ratio
         if returns:
-            import statistics
-
             mean_return = statistics.mean(returns)
             std_return = statistics.stdev(returns) if len(returns) > 1 else 0
             sharpe = round(mean_return / std_return * (252**0.5), 8) if std_return > 0 else 0
         else:
+            mean_return = 0.0
             sharpe = 0.0
+
+        # Sortino ratio (downside deviation)
+        if returns:
+            downside_returns = [r for r in returns if r < 0]
+            if downside_returns:
+                downside_dev = math.sqrt(
+                    sum(r ** 2 for r in downside_returns) / len(downside_returns)
+                )
+                sortino = round(mean_return / downside_dev * (252**0.5), 8) if downside_dev > 0 else 0
+            else:
+                sortino = 0.0
+        else:
+            sortino = 0.0
 
         # Max drawdown
         max_dd = 0.0
+        max_dd_dollars = 0.0
         peak = equities[0]
         for eq in equities:
             if eq > peak:
                 peak = eq
             dd = (peak - eq) / peak if peak > 0 else 0
+            dd_dollars = peak - eq
             if dd > max_dd:
                 max_dd = dd
+            if dd_dollars > max_dd_dollars:
+                max_dd_dollars = dd_dollars
         max_dd = round(max_dd, 8)
+        max_dd_dollars = round(max_dd_dollars, 2)
 
-        # Compute round-trip trade PnL from fills
-        trade_pnls = self._compute_trade_pnls()
-        total_trades = len(trade_pnls)  # Round-trip trades (like TradingView)
-        winning_trades = [p for p in trade_pnls if p > 0]
-        losing_trades = [p for p in trade_pnls if p < 0]
+        # Buy & Hold return (first symbol)
+        buy_hold_return = 0.0
+        if self._prepared_data:
+            first_symbol = list(self._prepared_data.keys())[0]
+            df = self._prepared_data[first_symbol]
+            if len(df) >= 2:
+                first_close = float(df.row(0, named=True)["close"])
+                last_close = float(df.row(len(df) - 1, named=True)["close"])
+                if first_close > 0:
+                    buy_hold_return = round((last_close - first_close) / first_close, 8)
+
+        # Total commission paid
+        total_commission = round(sum(f.get("fee", 0) for f in self.all_fills), 8)
+
+        # Compute round-trip trades with detailed stats
+        trades = self._compute_round_trip_trades()
+        trade_pnls = [t["pnl"] for t in trades]
+        total_trades = len(trade_pnls)
+        winning_trades = [t for t in trades if t["pnl"] > 0]
+        losing_trades = [t for t in trades if t["pnl"] < 0]
+
+        win_pnls = [t["pnl"] for t in winning_trades]
+        loss_pnls = [t["pnl"] for t in losing_trades]
 
         win_rate = round(len(winning_trades) / total_trades, 8) if total_trades > 0 else 0
 
-        gross_profit = sum(winning_trades)
-        gross_loss = abs(sum(losing_trades))
+        gross_profit = round(sum(win_pnls), 2)
+        gross_loss = round(abs(sum(loss_pnls)), 2)
         profit_factor = round(gross_profit / gross_loss, 8) if gross_loss > 0 else 0
 
         avg_trade_return = (
@@ -479,22 +534,56 @@ class Engine:
             if total_trades > 0 else 0
         )
 
+        avg_win = round(statistics.mean(win_pnls), 2) if win_pnls else 0
+        avg_loss = round(statistics.mean(loss_pnls), 2) if loss_pnls else 0
+        largest_win = round(max(win_pnls), 2) if win_pnls else 0
+        largest_loss = round(min(loss_pnls), 2) if loss_pnls else 0
+
+        # Avg bars in trades
+        bars_in_trades = [t["bars"] for t in trades if t["bars"] > 0]
+        avg_bars = round(statistics.mean(bars_in_trades), 1) if bars_in_trades else 0
+
+        # Max contracts held (max absolute position size across all fills)
+        max_contracts = self._compute_max_contracts()
+
+        # Open P&L (unrealized)
+        open_pl = round(
+            sum(p.unrealized_pnl for p in self.portfolio.positions.values()),
+            2,
+        )
+
         return {
             "totalReturn": total_return,
             "annualizedReturn": annualized,
             "sharpeRatio": sharpe,
+            "sortinoRatio": sortino,
             "maxDrawdown": max_dd,
+            "maxDrawdownDollars": max_dd_dollars,
             "winRate": win_rate,
             "profitFactor": profit_factor,
             "totalTrades": total_trades,
             "avgTradeReturn": avg_trade_return,
+            "netProfit": net_profit,
+            "grossProfit": gross_profit,
+            "grossLoss": gross_loss,
+            "buyHoldReturn": buy_hold_return,
+            "totalCommission": total_commission,
+            "numWinningTrades": len(winning_trades),
+            "numLosingTrades": len(losing_trades),
+            "avgWin": avg_win,
+            "avgLoss": avg_loss,
+            "largestWin": largest_win,
+            "largestLoss": largest_loss,
+            "avgBarsInTrades": avg_bars,
+            "maxContractsHeld": max_contracts,
+            "openPL": open_pl,
         }
 
-    def _compute_trade_pnls(self) -> list[float]:
-        """Compute PnL for each round-trip trade from fills."""
-        # Track positions per symbol: {symbol: (quantity, cost_basis)}
-        positions: dict[str, tuple[float, float]] = {}
-        trade_pnls: list[float] = []
+    def _compute_round_trip_trades(self) -> list[dict[str, Any]]:
+        """Compute round-trip trades with PnL and bar duration from fills."""
+        # Track positions per symbol: {symbol: (quantity, cost_basis, entry_bar)}
+        positions: dict[str, tuple[float, float, int]] = {}
+        trades: list[dict[str, Any]] = []
 
         for fill in self.all_fills:
             symbol = fill["symbol"]
@@ -502,8 +591,9 @@ class Engine:
             qty = fill["quantity"]
             price = fill["fill_price"]
             fee = fill.get("fee", 0)
+            bar_idx = fill.get("bar_index", 0)
 
-            pos_qty, pos_cost = positions.get(symbol, (0.0, 0.0))
+            pos_qty, pos_cost, entry_bar = positions.get(symbol, (0.0, 0.0, 0))
 
             if side == "buy":
                 if pos_qty < 0:
@@ -511,33 +601,66 @@ class Engine:
                     close_qty = min(qty, abs(pos_qty))
                     avg_entry = pos_cost / abs(pos_qty) if pos_qty != 0 else 0
                     pnl = close_qty * (avg_entry - price) - fee
-                    trade_pnls.append(round(pnl, 8))
+                    trades.append({
+                        "pnl": round(pnl, 8),
+                        "bars": bar_idx - entry_bar,
+                        "symbol": symbol,
+                    })
                     remaining = qty - close_qty
                     if remaining > 0:
-                        positions[symbol] = (remaining, remaining * price)
+                        positions[symbol] = (remaining, remaining * price, bar_idx)
                     else:
                         new_qty = pos_qty + close_qty
                         new_cost = pos_cost + close_qty * avg_entry if new_qty != 0 else 0
-                        positions[symbol] = (new_qty, new_cost)
+                        positions[symbol] = (new_qty, new_cost, entry_bar)
                 else:
                     # Opening/adding to long position
-                    positions[symbol] = (pos_qty + qty, pos_cost + qty * price)
+                    eb = entry_bar if pos_qty > 0 else bar_idx
+                    positions[symbol] = (pos_qty + qty, pos_cost + qty * price, eb)
             elif side == "sell":
                 if pos_qty > 0:
                     # Closing long position
                     close_qty = min(qty, pos_qty)
                     avg_entry = pos_cost / pos_qty if pos_qty != 0 else 0
                     pnl = close_qty * (price - avg_entry) - fee
-                    trade_pnls.append(round(pnl, 8))
+                    trades.append({
+                        "pnl": round(pnl, 8),
+                        "bars": bar_idx - entry_bar,
+                        "symbol": symbol,
+                    })
                     remaining = qty - close_qty
                     if remaining > 0:
-                        positions[symbol] = (-remaining, remaining * price)
+                        positions[symbol] = (-remaining, remaining * price, bar_idx)
                     else:
                         new_qty = pos_qty - close_qty
                         new_cost = pos_cost - close_qty * avg_entry if new_qty != 0 else 0
-                        positions[symbol] = (new_qty, new_cost)
+                        positions[symbol] = (new_qty, new_cost, entry_bar)
                 else:
                     # Opening/adding to short position
-                    positions[symbol] = (pos_qty - qty, pos_cost + qty * price)
+                    eb = entry_bar if pos_qty < 0 else bar_idx
+                    positions[symbol] = (pos_qty - qty, pos_cost + qty * price, eb)
 
-        return trade_pnls
+        return trades
+
+    def _compute_trade_pnls(self) -> list[float]:
+        """Compute PnL for each round-trip trade from fills (legacy helper)."""
+        return [t["pnl"] for t in self._compute_round_trip_trades()]
+
+    def _compute_max_contracts(self) -> float:
+        """Compute the maximum absolute position size held during the run."""
+        max_held = 0.0
+        positions: dict[str, float] = {}
+        for fill in self.all_fills:
+            symbol = fill["symbol"]
+            qty = fill["quantity"]
+            side = fill["side"]
+            cur = positions.get(symbol, 0.0)
+            if side == "buy":
+                cur += qty
+            else:
+                cur -= qty
+            positions[symbol] = cur
+            total = sum(abs(v) for v in positions.values())
+            if total > max_held:
+                max_held = total
+        return round(max_held, 2)

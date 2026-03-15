@@ -162,27 +162,7 @@ export function RunDetailPage() {
         )}
 
         {/* Metrics */}
-        {metrics && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <MetricCard label="Total Return" value={`${(metrics.totalReturn * 100).toFixed(2)}%`} />
-            <MetricCard label="Sharpe Ratio" value={metrics.sharpeRatio.toFixed(4)} />
-            <MetricCard
-              label="Max Drawdown"
-              value={`${(metrics.maxDrawdown * 100).toFixed(2)}%`}
-            />
-            <MetricCard label="Win Rate" value={`${(metrics.winRate * 100).toFixed(1)}%`} />
-            <MetricCard label="Profit Factor" value={metrics.profitFactor.toFixed(4)} />
-            <MetricCard label="Total Trades" value={metrics.totalTrades.toString()} />
-            <MetricCard
-              label="Annualized Return"
-              value={`${(metrics.annualizedReturn * 100).toFixed(2)}%`}
-            />
-            <MetricCard
-              label="Avg Trade Return"
-              value={`${(metrics.avgTradeReturn * 100).toFixed(4)}%`}
-            />
-          </div>
-        )}
+        {metrics && <MetricsScorecard metrics={metrics} />}
 
         {/* Tabs */}
         <div className="flex gap-1 border-b border-gray-800">
@@ -250,11 +230,105 @@ export function RunDetailPage() {
   );
 }
 
-function MetricCard({ label, value }: { label: string; value: string }) {
+function MetricsScorecard({ metrics }: { metrics: Record<string, number> }) {
+  const fmt = (v: number, decimals = 2) => v.toFixed(decimals);
+  const fmtPct = (v: number) => `${(v * 100).toFixed(2)}%`;
+  const fmtDollar = (v: number) => {
+    const sign = v >= 0 ? '' : '-';
+    return `${sign}$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+  const profitColor = (v: number) => (v >= 0 ? 'text-green-400' : 'text-red-400');
+
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
+    <div className="space-y-4">
+      {/* P&L Overview */}
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+        <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
+          Profit & Loss
+        </h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <MetricCard
+            label="Net P&L"
+            value={fmtDollar(metrics.netProfit)}
+            color={profitColor(metrics.netProfit)}
+          />
+          <MetricCard
+            label="Net Profit"
+            value={fmtPct(metrics.totalReturn)}
+            color={profitColor(metrics.totalReturn)}
+          />
+          <MetricCard label="Gross Profit" value={fmtDollar(metrics.grossProfit)} color="text-green-400" />
+          <MetricCard label="Gross Loss" value={fmtDollar(metrics.grossLoss)} color="text-red-400" />
+        </div>
+      </div>
+
+      {/* Performance */}
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+        <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
+          Performance
+        </h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <MetricCard label="Annualized Return" value={fmtPct(metrics.annualizedReturn)} color={profitColor(metrics.annualizedReturn)} />
+          <MetricCard label="Buy & Hold Return" value={fmtPct(metrics.buyHoldReturn)} color={profitColor(metrics.buyHoldReturn)} />
+          <MetricCard
+            label="Max Drawdown"
+            value={`${fmtPct(metrics.maxDrawdown)} (${fmtDollar(metrics.maxDrawdownDollars)})`}
+            color="text-red-400"
+          />
+          <MetricCard label="Profit Factor" value={fmt(metrics.profitFactor, 3)} />
+        </div>
+      </div>
+
+      {/* Risk */}
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+        <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
+          Risk Ratios
+        </h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <MetricCard label="Sharpe Ratio" value={fmt(metrics.sharpeRatio, 4)} />
+          <MetricCard label="Sortino Ratio" value={fmt(metrics.sortinoRatio ?? 0, 4)} />
+          <MetricCard label="Win Rate" value={fmtPct(metrics.winRate)} />
+          <MetricCard label="Avg Trade Return" value={fmtPct(metrics.avgTradeReturn)} />
+        </div>
+      </div>
+
+      {/* Trade Statistics */}
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+        <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
+          Trade Statistics
+        </h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <MetricCard label="Total Closed Trades" value={String(metrics.totalTrades)} />
+          <MetricCard label="Winning Trades" value={String(metrics.numWinningTrades ?? 0)} color="text-green-400" />
+          <MetricCard label="Losing Trades" value={String(metrics.numLosingTrades ?? 0)} color="text-red-400" />
+          <MetricCard label="Avg Bars in Trades" value={fmt(metrics.avgBarsInTrades ?? 0, 1)} />
+          <MetricCard label="Avg Win" value={fmtDollar(metrics.avgWin ?? 0)} color="text-green-400" />
+          <MetricCard label="Avg Loss" value={fmtDollar(metrics.avgLoss ?? 0)} color="text-red-400" />
+          <MetricCard label="Largest Win" value={fmtDollar(metrics.largestWin ?? 0)} color="text-green-400" />
+          <MetricCard label="Largest Loss" value={fmtDollar(metrics.largestLoss ?? 0)} color="text-red-400" />
+        </div>
+      </div>
+
+      {/* Position & Costs */}
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+        <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
+          Position & Costs
+        </h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <MetricCard label="Max Contracts Held" value={fmt(metrics.maxContractsHeld ?? 0, 0)} />
+          <MetricCard label="Open P&L" value={fmtDollar(metrics.openPL ?? 0)} color={profitColor(metrics.openPL ?? 0)} />
+          <MetricCard label="Commission Paid" value={fmtDollar(metrics.totalCommission ?? 0)} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="bg-gray-950/50 border border-gray-800/50 rounded-lg p-3">
       <div className="text-xs text-gray-400">{label}</div>
-      <div className="text-lg font-semibold mt-0.5">{value}</div>
+      <div className={`text-lg font-semibold mt-0.5 ${color || 'text-gray-100'}`}>{value}</div>
     </div>
   );
 }
