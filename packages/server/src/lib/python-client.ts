@@ -95,6 +95,13 @@ export const pythonClient = {
     });
   },
 
+  generateStrategy(data: { strategyMd: string }) {
+    return request<{ strategyPy: string; pineScript: string; valid: boolean; errors: string[] }>('/api/strategy/generate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
   health() {
     return request<{ status: string }>('/health');
   },

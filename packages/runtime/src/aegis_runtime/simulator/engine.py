@@ -323,6 +323,30 @@ class Engine:
             # Yield to event loop to allow SSE streaming to observers
             await asyncio.sleep(0)
 
+        # Close all open positions at last bar's close price
+        if not self._cancelled:
+            for symbol, position in list(self.portfolio.positions.items()):
+                if position.quantity > 0:
+                    close_price = current_prices.get(symbol, position.current_price)
+                    qty = int(position.quantity)
+                    fee = self.fee_model.compute_fee(qty, close_price)
+                    self.portfolio.apply_fill(symbol, "sell", qty, close_price, fee)
+
+                    fill_record = {
+                        "symbol": symbol,
+                        "side": "sell",
+                        "order_type": "market",
+                        "quantity": qty,
+                        "fill_price": close_price,
+                        "fee": fee,
+                        "slippage": 0.0,
+                        "bar_index": self.bar_index,
+                        "timestamp": bar_timestamp,
+                        "reason": "close_on_last_bar",
+                    }
+                    self.all_fills.append(fill_record)
+                    await self._emit_event("order.filled", fill_record)
+
         # Final checkpoint
         await self._save_checkpoint(self.bar_index)
 

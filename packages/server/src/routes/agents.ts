@@ -3,6 +3,7 @@ import { eq, desc } from 'drizzle-orm';
 import { db } from '../lib/db';
 import { agents, strategyVersions, soulVersions, runs } from '@aegis/db/schema';
 import { agentIsolation } from '../middleware/agent-isolation';
+import { pythonClient } from '../lib/python-client';
 
 export const agentRoutes = new Hono();
 
@@ -46,6 +47,22 @@ agentRoutes.get('/:id/runs', agentIsolation('agent'), async (c) => {
     orderBy: [desc(runs.createdAt)],
   });
   return c.json({ data: agentRuns });
+});
+
+agentRoutes.post('/generate-strategy', async (c) => {
+  const body = await c.req.json();
+  const strategyMd = body.strategyMd as string;
+  if (!strategyMd?.trim()) {
+    return c.json({ error: { message: 'strategyMd is required', code: 'BAD_REQUEST' } }, 400);
+  }
+
+  try {
+    const result = await pythonClient.generateStrategy({ strategyMd });
+    return c.json({ data: result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Strategy generation failed';
+    return c.json({ error: { message, code: 'GENERATION_FAILED' } }, 500);
+  }
 });
 
 agentRoutes.put('/:id/strategy', async (c) => {

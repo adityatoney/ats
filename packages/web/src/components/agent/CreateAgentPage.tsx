@@ -132,6 +132,9 @@ export function CreateAgentPage() {
   const [strategyMd, setStrategyMd] = useState(STRATEGY_MD_TEMPLATE);
   const [strategyPy, setStrategyPy] = useState(STRATEGY_PY_TEMPLATE);
   const [loading, setLoading] = useState(false);
+  const [pineScript, setPineScript] = useState('');
+  const [generating, setGenerating] = useState(false);
+  const [pineCopied, setPineCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Get projectId from existing agents
@@ -141,6 +144,37 @@ export function CreateAgentPage() {
   });
 
   const projectId = agents?.[0]?.projectId as string | undefined;
+
+  const handleGenerate = async () => {
+    if (!strategyMd.trim()) return;
+
+    setGenerating(true);
+    setError(null);
+
+    try {
+      const result = (await api.generateStrategy(strategyMd)) as {
+        strategyPy: string;
+        pineScript: string;
+        valid: boolean;
+        errors: string[];
+      };
+      if (result.strategyPy) {
+        setStrategyPy(result.strategyPy);
+      }
+      if (result.pineScript) {
+        setPineScript(result.pineScript);
+        setPineCopied(false);
+      }
+      if (result.errors?.length) {
+        setError(`Generated code has validation warnings: ${result.errors.join(', ')}`);
+      }
+    } catch (err) {
+      console.error('Failed to generate strategy:', err);
+      setError(err instanceof Error ? err.message : 'Failed to generate strategy');
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -222,6 +256,22 @@ export function CreateAgentPage() {
               />
             </div>
 
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleGenerate}
+                disabled={generating || !strategyMd.trim()}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors"
+              >
+                {generating ? 'Generating...' : 'Generate Python from Strategy'}
+              </button>
+              {generating && (
+                <span className="text-xs text-gray-400">
+                  Using AI to convert your markdown strategy into Python code...
+                </span>
+              )}
+            </div>
+
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-1">
                 Strategy Implementation (Python)
@@ -232,6 +282,7 @@ export function CreateAgentPage() {
                 <code className="text-gray-400">generate_signal</code>,{' '}
                 <code className="text-gray-400">size_position</code>, and{' '}
                 <code className="text-gray-400">risk_gate</code>.
+                {' '}Or use the button above to auto-generate from your markdown.
               </p>
               <textarea
                 value={strategyPy}
@@ -239,6 +290,33 @@ export function CreateAgentPage() {
                 className="w-full h-96 bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm font-mono text-gray-200 focus:outline-none focus:border-blue-500"
               />
             </div>
+
+            {pineScript && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium text-gray-300">
+                    Pine Script v6 (TradingView)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(pineScript);
+                      setPineCopied(true);
+                      setTimeout(() => setPineCopied(false), 2000);
+                    }}
+                    className="px-3 py-1 bg-gray-700 text-gray-200 rounded text-xs font-medium hover:bg-gray-600 transition-colors"
+                  >
+                    {pineCopied ? 'Copied!' : 'Copy to Clipboard'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mb-2">
+                  Paste this into TradingView to validate signal logic matches the Python implementation.
+                </p>
+                <pre className="w-full max-h-80 overflow-auto bg-gray-950 border border-gray-700 rounded-lg p-3 text-sm font-mono text-green-400 whitespace-pre-wrap">
+                  {pineScript}
+                </pre>
+              </div>
+            )}
 
             <div className="flex gap-3">
               <button

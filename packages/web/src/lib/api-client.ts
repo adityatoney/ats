@@ -34,6 +34,11 @@ export const api = {
     agentId: string,
     data: { strategyMd: string; strategyPy?: string; configJson?: Record<string, unknown> },
   ) => request(`/agents/${agentId}/strategy`, { method: 'PUT', body: JSON.stringify(data) }),
+  generateStrategy: (strategyMd: string) =>
+    request<{ strategyPy: string; pineScript: string; valid: boolean; errors: string[] }>(`/agents/generate-strategy`, {
+      method: 'POST',
+      body: JSON.stringify({ strategyMd }),
+    }),
 
   // Runs
   startBacktest: (data: {

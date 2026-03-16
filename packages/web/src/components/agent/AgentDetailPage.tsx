@@ -1,5 +1,5 @@
 import { useParams, Link } from 'react-router-dom';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../ui/Layout';
 import { useAgent } from '../../hooks/useAgent';
@@ -11,6 +11,13 @@ export function AgentDetailPage() {
   const [activeTab, setActiveTab] = useState<'strategy' | 'soul' | 'history'>('strategy');
   const [strategyMd, setStrategyMd] = useState('');
   const [strategyPy, setStrategyPy] = useState('');
+  const [pineScript, setPineScript] = useState('');
+  const [pineCopied, setPineCopied] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [initialized, setInitialized] = useState(false);
 
   const agentData = agent as Record<string, unknown> | undefined;
 
@@ -26,10 +33,80 @@ export function AgentDetailPage() {
     enabled: !!id && activeTab === 'soul',
   });
 
+  const latestStrategy = agentData?.latestStrategy as Record<string, unknown> | null;
+
+  // Initialize form state from latest strategy (only once)
+  useEffect(() => {
+    if (latestStrategy && !initialized) {
+      setStrategyMd((latestStrategy.strategyMd as string) || '');
+      setStrategyPy((latestStrategy.strategyPy as string) || '');
+      setInitialized(true);
+    }
+  }, [latestStrategy, initialized]);
+
+  const hasChanges =
+    initialized &&
+    latestStrategy &&
+    (strategyMd !== ((latestStrategy.strategyMd as string) || '') ||
+      strategyPy !== ((latestStrategy.strategyPy as string) || ''));
+
+  const handleGenerate = async () => {
+    if (!strategyMd.trim()) return;
+    setGenerating(true);
+    setError(null);
+
+    try {
+      const result = (await api.generateStrategy(strategyMd)) as {
+        strategyPy: string;
+        pineScript: string;
+        valid: boolean;
+        errors: string[];
+      };
+      if (result.strategyPy) {
+        setStrategyPy(result.strategyPy);
+      }
+      if (result.pineScript) {
+        setPineScript(result.pineScript);
+        setPineCopied(false);
+      }
+      if (result.errors?.length) {
+        setError(`Generated code has validation warnings: ${result.errors.join(', ')}`);
+      }
+    } catch (err) {
+      console.error('Failed to generate strategy:', err);
+      setError(err instanceof Error ? err.message : 'Failed to generate strategy');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!id) return;
+    setSaving(true);
+    setError(null);
+    setSaveMsg(null);
+
+    try {
+      await api.updateStrategy(id, {
+        strategyMd,
+        strategyPy: strategyPy.trim() || undefined,
+      });
+      await refetch();
+      // Re-sync initialized state with new latest
+      setInitialized(false);
+      setSaveMsg('Strategy saved as new version.');
+      setTimeout(() => setSaveMsg(null), 3000);
+    } catch (err) {
+      console.error('Failed to save strategy:', err);
+      setError(err instanceof Error ? err.message : 'Failed to save strategy');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (isLoading) return <Layout><div className="text-gray-400">Loading...</div></Layout>;
   if (!agentData) return <Layout><div className="text-gray-400">Agent not found</div></Layout>;
 
-  const latestStrategy = agentData.latestStrategy as Record<string, unknown> | null;
   const activeSoul = agentData.activeSoul as Record<string, unknown> | null;
 
   return (
@@ -41,6 +118,12 @@ export function AgentDetailPage() {
               &larr; Dashboard
             </Link>
             <h1 className="text-2xl font-bold mt-1">{agentData.name as string}</h1>
+            {latestStrategy && (
+              <p className="text-xs text-gray-500 mt-0.5">
+                Strategy v{latestStrategy.version as number} &middot;{' '}
+                {new Date(latestStrategy.createdAt as string).toLocaleString()}
+              </p>
+            )}
           </div>
           <Link
             to={`/agents/${id}/backtest`}
@@ -49,6 +132,17 @@ export function AgentDetailPage() {
             Run Backtest
           </Link>
         </div>
+
+        {error && (
+          <div className="bg-red-900/50 border border-red-700 rounded-lg p-3 text-sm text-red-300">
+            {error}
+          </div>
+        )}
+        {saveMsg && (
+          <div className="bg-green-900/50 border border-green-700 rounded-lg p-3 text-sm text-green-300">
+            {saveMsg}
+          </div>
+        )}
 
         <div className="flex gap-1 border-b border-gray-800">
           {(['strategy', 'soul', 'history'] as const).map((tab) => (
@@ -70,36 +164,93 @@ export function AgentDetailPage() {
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-1">
-                Strategy Markdown
+                Strategy Rules (Markdown)
               </label>
+              <p className="text-xs text-gray-500 mb-2">
+                Describe your trading strategy in plain language — entry/exit criteria, risk rules,
+                and sizing.
+              </p>
               <textarea
-                className="w-full h-64 bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm font-mono text-gray-200 focus:outline-none focus:border-blue-500"
-                value={strategyMd || (latestStrategy?.strategyMd as string) || ''}
+                className="w-full h-72 bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm font-mono text-gray-200 focus:outline-none focus:border-blue-500"
+                value={strategyMd}
                 onChange={(e) => setStrategyMd(e.target.value)}
               />
             </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleGenerate}
+                disabled={generating || !strategyMd.trim()}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors"
+              >
+                {generating ? 'Generating...' : 'Generate Python from Strategy'}
+              </button>
+              {generating && (
+                <span className="text-xs text-gray-400">
+                  Using AI to convert your markdown strategy into Python + Pine Script...
+                </span>
+              )}
+            </div>
+
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-1">
-                Strategy Python
+                Strategy Implementation (Python)
               </label>
+              <p className="text-xs text-gray-500 mb-2">
+                Implement four functions:{' '}
+                <code className="text-gray-400">prepare_features</code>,{' '}
+                <code className="text-gray-400">generate_signal</code>,{' '}
+                <code className="text-gray-400">size_position</code>, and{' '}
+                <code className="text-gray-400">risk_gate</code>.
+                {' '}Or use the button above to auto-generate from your markdown.
+              </p>
               <textarea
-                className="w-full h-64 bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm font-mono text-gray-200 focus:outline-none focus:border-blue-500"
-                value={strategyPy || (latestStrategy?.strategyPy as string) || ''}
+                className="w-full h-96 bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm font-mono text-gray-200 focus:outline-none focus:border-blue-500"
+                value={strategyPy}
                 onChange={(e) => setStrategyPy(e.target.value)}
               />
             </div>
-            <button
-              onClick={async () => {
-                await api.updateStrategy(id!, {
-                  strategyMd: strategyMd || (latestStrategy?.strategyMd as string) || '',
-                  strategyPy: strategyPy || (latestStrategy?.strategyPy as string) || undefined,
-                });
-                refetch();
-              }}
-              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
-            >
-              Save Strategy
-            </button>
+
+            {pineScript && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium text-gray-300">
+                    Pine Script v6 (TradingView)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(pineScript);
+                      setPineCopied(true);
+                      setTimeout(() => setPineCopied(false), 2000);
+                    }}
+                    className="px-3 py-1 bg-gray-700 text-gray-200 rounded text-xs font-medium hover:bg-gray-600 transition-colors"
+                  >
+                    {pineCopied ? 'Copied!' : 'Copy to Clipboard'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mb-2">
+                  Paste this into TradingView to validate signal logic matches the Python implementation.
+                </p>
+                <pre className="w-full max-h-80 overflow-auto bg-gray-950 border border-gray-700 rounded-lg p-3 text-sm font-mono text-green-400 whitespace-pre-wrap">
+                  {pineScript}
+                </pre>
+              </div>
+            )}
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleSave}
+                disabled={saving || !strategyMd.trim()}
+                className="px-6 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
+              >
+                {saving ? 'Saving...' : 'Save Strategy'}
+              </button>
+              {hasChanges && (
+                <span className="text-xs text-yellow-400">Unsaved changes</span>
+              )}
+            </div>
           </div>
         )}
 
