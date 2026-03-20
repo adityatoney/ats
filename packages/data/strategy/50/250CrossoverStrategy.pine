@@ -1,5 +1,5 @@
 //@version=6
-indicator("MA Crossover Strategy", overlay=true)
+strategy("MA 50/250 Crossover Strategy", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, max_bars_back=500)
 
 // Calculate moving averages
 sma_50 = ta.sma(close, 50)
@@ -13,7 +13,7 @@ plot(sma_250, color=color.red, title="SMA 250", linewidth=2)
 // Signal conditions
 golden_cross = ta.crossover(sma_50, sma_250)
 death_cross = ta.crossunder(sma_50, sma_250)
-volume_confirmation = volume > 1.5 * avg_volume_50
+volume_confirmation = volume > 1.5 * nz(avg_volume_50, 1)
 
 // Buy signal: golden cross with volume confirmation
 buy_signal = golden_cross and volume_confirmation
@@ -21,11 +21,12 @@ buy_signal = golden_cross and volume_confirmation
 // Sell signal: death cross
 sell_signal = death_cross
 
-// Plot signals
-plotshape(buy_signal, style=shape.triangleup, location=location.belowbar, 
-          color=color.green, size=size.normal, title="Buy Signal")
-plotshape(sell_signal, style=shape.triangledown, location=location.abovebar, 
-          color=color.red, size=size.normal, title="Sell Signal")
+// Execute strategy entries and exits
+if buy_signal
+    strategy.entry("Long", strategy.long)
+
+if sell_signal
+    strategy.close("Long")
 
 // Background highlighting for signal bars
 bgcolor(buy_signal ? color.new(color.green, 90) : na)
@@ -45,4 +46,4 @@ if barstate.islast
     table.cell(info_table, 0, 2, "SMA 250", text_color=color.black)
     table.cell(info_table, 1, 2, str.tostring(sma_250, "#.##"), text_color=color.black)
     table.cell(info_table, 0, 3, "Vol Ratio", text_color=color.black)
-    table.cell(info_table, 1, 3, str.tostring(volume / avg_volume_50, "#.##"), text_color=color.black)
+    table.cell(info_table, 1, 3, str.tostring(volume / nz(avg_volume_50, 1), "#.##"), text_color=color.black)

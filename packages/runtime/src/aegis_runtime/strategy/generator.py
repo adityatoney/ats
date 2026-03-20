@@ -10,7 +10,7 @@ You are an expert quantitative trading strategy developer. Your job is to conver
 a natural-language trading strategy description (in markdown) into TWO implementations:
 
 1. A Python module for the AegisTrader backtesting engine
-2. A Pine Script v6 indicator for TradingView validation
+2. A Pine Script v6 strategy for TradingView backtesting and validation
 
 ---
 
@@ -74,29 +74,29 @@ Return: `{"approved": True, "reason": ""}` to allow, or `{"approved": False, "re
 
 ---
 
-## PART 2: Pine Script v6 Indicator
+## PART 2: Pine Script v6 Strategy
 
-Create a TradingView Pine Script v6 indicator that implements the SAME entry/exit logic as the Python code.
+Create a TradingView Pine Script v6 strategy that implements the SAME entry/exit logic as the Python code. This must be a runnable strategy (not an indicator) so the user can backtest it directly in TradingView.
 
 ### Pine Script Rules
-1. Use `indicator()` (not `strategy()`) so it works on any TradingView plan.
+1. Use `strategy()` (NOT `indicator()`). Include sensible defaults: `strategy("Strategy Name", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)`.
 2. Start with `//@version=6` on the first line.
 3. Plot the key indicators used in the strategy (moving averages, RSI, bands, etc.).
-4. Use `plotshape()` to mark buy signals (green triangle below bar) and sell signals (red triangle above bar).
-5. Use `alertcondition()` for buy and sell signals.
-6. Add a background highlight (`bgcolor`) on signal bars for visibility.
-7. The signal logic MUST match the Python implementation exactly — same indicator parameters, same crossover/threshold conditions.
-8. Include brief comments explaining the logic.
+4. Use `strategy.entry("Long", strategy.long)` for buy signals and `strategy.close("Long")` for sell/exit signals. If the strategy supports shorting, use `strategy.entry("Short", strategy.short)` and `strategy.close("Short")`.
+5. Use `strategy.exit()` for stop-loss and take-profit levels when defined in the strategy description. Example: `strategy.exit("Exit Long", from_entry="Long", stop=stopPrice, limit=takeProfitPrice)`.
+6. Use `alertcondition()` for buy and sell signal alerts.
+7. Add a background highlight (`bgcolor`) on signal bars for visibility.
+8. The signal logic MUST match the Python implementation exactly — same indicator parameters, same crossover/threshold conditions.
+9. Include brief comments explaining the logic.
 
 ### Pine Script CRITICAL constraints (must follow to avoid compile errors)
-9. When `overlay=true`, ALL `plot()` calls MUST plot price-scale values only. Do NOT plot volume, ratios, oscillators, or multipliers on an overlay chart. Use `display=display.data_window` if you want non-price data visible only in the data window, but NEVER plot non-price-scale series as visible lines on an overlay chart.
-10. Guard against `na` in division: use `nz()` to replace na with 0 before dividing, e.g. `nz(avg_volume, 1)`.
-11. Do NOT use `strategy.*` functions — this is an `indicator()`, not a `strategy()`.
+10. When `overlay=true`, ALL `plot()` calls MUST plot price-scale values only. Do NOT plot volume, ratios, oscillators, or multipliers on an overlay chart. Use `display=display.data_window` if you want non-price data visible only in the data window, but NEVER plot non-price-scale series as visible lines on an overlay chart.
+11. Guard against `na` in division: use `nz()` to replace na with 0 before dividing, e.g. `nz(avg_volume, 1)`.
 12. Test that the script compiles with NO errors. Common pitfalls:
     - Mixing overlay and non-overlay plots (use separate `plot()` with `display=display.none` or `display=display.data_window` for non-price data)
     - Using undefined variables or functions
     - Incorrect function signatures
-13. For long-period indicators (e.g., SMA 200+), add `max_bars_back=500` in the `indicator()` call to ensure enough historical data.
+13. For long-period indicators (e.g., SMA 200+), add `max_bars_back=500` in the `strategy()` call to ensure enough historical data.
 
 ---
 
@@ -116,7 +116,7 @@ Include brief comments within each code block."""
 
 STRATEGY_USER_PROMPT_TEMPLATE = """\
 Convert the following trading strategy description into both a Python implementation \
-(for AegisTrader) and a Pine Script v6 indicator (for TradingView validation).
+(for AegisTrader) and a Pine Script v6 strategy (for TradingView backtesting and validation).
 
 ## Strategy Description
 
