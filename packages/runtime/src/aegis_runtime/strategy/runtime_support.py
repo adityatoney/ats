@@ -6,7 +6,7 @@ from typing import Any
 
 import polars as pl
 
-from aegis_runtime.strategy.ir import IRExpression, StrategyIR, StrategyOrderAction
+from aegis_runtime.strategy.ir import IRExpression, IRStatement, StrategyIR, StrategyOrderAction
 
 
 class DeterministicStrategyRuntime:
@@ -24,6 +24,20 @@ class DeterministicStrategyRuntime:
             if item.defaultExpression is not None
         }
         self.functions = {function.name: function for function in self.ir.functions}
+        self.runtime_statements = (
+            self.ir.statements
+            if self.ir.statements
+            else [
+                IRStatement(
+                    kind="assign",
+                    name=calculation.name,
+                    expression=calculation.expression,
+                    assignmentKind=calculation.kind,
+                    typeHint=calculation.typeHint,
+                )
+                for calculation in self.ir.indicators
+            ]
+        )
         self.symbol_states: dict[str, dict[str, Any]] = {}
         self._last_signal_plan: dict[str, Any] | None = None
 
@@ -39,7 +53,8 @@ class DeterministicStrategyRuntime:
         if price is None or price <= 0:
             return None
 
-        for order in self.ir.orders:
+        inline_orders = env.get("__inline_orders__", [])
+        for order in [*inline_orders, *self.ir.orders]:
             if not self._is_truthy(
                 self._evaluate_expression(
                     order.when,
@@ -117,6 +132,7 @@ class DeterministicStrategyRuntime:
                 "bar_values": [],
                 "persistent_values": {},
                 "security_cache": {},
+                "function_persistent_values": {},
             }
         return self.symbol_states[symbol]
 
@@ -132,32 +148,20 @@ class DeterministicStrategyRuntime:
             env.update(persistent_values)
 
             calculated_values: dict[str, Any] = {}
-            for calculation in self.ir.indicators:
-                if calculation.kind == "persistent_assign":
-                    if calculation.name not in persistent_values:
-                        persistent_values[calculation.name] = self._evaluate_expression(
-                            calculation.expression,
-                            state.history,
-                            bar_index,
-                            symbol_state,
-                            portfolio,
-                            env,
-                        )
-                    value = persistent_values[calculation.name]
-                else:
-                    value = self._evaluate_expression(
-                        calculation.expression,
-                        state.history,
-                        bar_index,
-                        symbol_state,
-                        portfolio,
-                        env,
-                    )
-                    if calculation.kind == "reassign" or calculation.name in persistent_values:
-                        persistent_values[calculation.name] = value
-
-                env[calculation.name] = value
-                calculated_values[calculation.name] = value
+            inline_orders: list[StrategyOrderAction] = []
+            self._execute_statements(
+                self.runtime_statements,
+                state.history,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env,
+                persistent_values=persistent_values,
+                calculated_values=calculated_values,
+                inline_orders=inline_orders,
+            )
+            if inline_orders:
+                calculated_values["__inline_orders__"] = inline_orders
 
             bar_values.append(calculated_values)
 
@@ -169,6 +173,165 @@ class DeterministicStrategyRuntime:
         env["__symbol__"] = state.symbol
         env.update({key: value for key, value in persistent_values.items() if key not in env})
         return env
+
+    def _execute_statements(
+        self,
+        statements: list[IRStatement],
+        history_rows: list[dict[str, Any]],
+        bar_index: int,
+        symbol_state: dict[str, Any],
+        portfolio,
+        env_current: dict[str, Any],
+        *,
+        persistent_values: dict[str, Any],
+        calculated_values: dict[str, Any] | None = None,
+        inline_orders: list[StrategyOrderAction] | None = None,
+    ) -> tuple[str | None, Any]:
+        for statement in statements:
+            if statement.kind == "assign":
+                value = self._evaluate_expression(
+                    statement.expression,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                )
+                if statement.assignmentKind == "persistent_assign":
+                    if statement.name not in persistent_values:
+                        persistent_values[statement.name] = value
+                    value = persistent_values[statement.name]
+                else:
+                    if statement.assignmentKind == "reassign" or statement.name in persistent_values:
+                        persistent_values[statement.name] = value
+                env_current[statement.name] = value
+                if calculated_values is not None:
+                    calculated_values[statement.name] = value
+                continue
+
+            if statement.kind == "expr":
+                result = self._evaluate_expression(
+                    statement.expression,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                )
+                self._collect_inline_orders(result, inline_orders)
+                continue
+
+            if statement.kind == "if":
+                branch = statement.body if self._is_truthy(
+                    self._evaluate_expression(
+                        statement.test,
+                        history_rows,
+                        bar_index,
+                        symbol_state,
+                        portfolio,
+                        env_current,
+                    )
+                ) else statement.orelse
+                control, value = self._execute_statements(
+                    branch,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    persistent_values=persistent_values,
+                    calculated_values=calculated_values,
+                    inline_orders=inline_orders,
+                )
+                if control is not None:
+                    return control, value
+                continue
+
+            if statement.kind == "for_to":
+                start = self._coerce_number(
+                    self._evaluate_expression(
+                        statement.start,
+                        history_rows,
+                        bar_index,
+                        symbol_state,
+                        portfolio,
+                        env_current,
+                    )
+                )
+                end = self._coerce_number(
+                    self._evaluate_expression(
+                        statement.end,
+                        history_rows,
+                        bar_index,
+                        symbol_state,
+                        portfolio,
+                        env_current,
+                    )
+                )
+                step = 1
+                if statement.step is not None:
+                    step_value = self._coerce_number(
+                        self._evaluate_expression(
+                            statement.step,
+                            history_rows,
+                            bar_index,
+                            symbol_state,
+                            portfolio,
+                            env_current,
+                        )
+                    )
+                    step = int(step_value or 1)
+                if start is None or end is None or step == 0:
+                    continue
+                stop = int(end) + (1 if step > 0 else -1)
+                for loop_value in range(int(start), stop, step):
+                    env_current[statement.name] = loop_value
+                    control, value = self._execute_statements(
+                        statement.body,
+                        history_rows,
+                        bar_index,
+                        symbol_state,
+                        portfolio,
+                        env_current,
+                        persistent_values=persistent_values,
+                        calculated_values=calculated_values,
+                        inline_orders=inline_orders,
+                    )
+                    if control == "break":
+                        break
+                    if control == "return":
+                        return control, value
+                continue
+
+            if statement.kind == "break":
+                return "break", None
+
+            if statement.kind == "return":
+                value = self._evaluate_expression(
+                    statement.expression,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                )
+                return "return", value
+
+        return None, None
+
+    def _collect_inline_orders(
+        self,
+        result: Any,
+        inline_orders: list[StrategyOrderAction] | None,
+    ) -> None:
+        if inline_orders is None or result is None:
+            return
+        if isinstance(result, StrategyOrderAction):
+            inline_orders.append(result)
+            return
+        if isinstance(result, list):
+            for item in result:
+                self._collect_inline_orders(item, inline_orders)
 
     def _evaluate_expression(
         self,
@@ -358,6 +521,10 @@ class DeterministicStrategyRuntime:
         *,
         extra_context: dict[str, Any] | None = None,
     ) -> Any:
+        base_path = self._expression_path(expression.base)
+        if base_path == "strategy.opentrades":
+            return 1 if env_current.get("__symbol__") and portfolio and portfolio.positions.get(env_current.get("__symbol__")) else 0
+
         index_value = self._coerce_number(
             self._evaluate_expression(
                 expression.index,
@@ -441,6 +608,39 @@ class DeterministicStrategyRuntime:
                 else {}
             )
             return self._timestamp_to_epoch_ms(row.get("timestamp"))
+        if name == "hour":
+            row = (
+                history_rows[bar_index]
+                if history_rows and 0 <= bar_index < len(history_rows)
+                else {}
+            )
+            timestamp = self._timestamp_to_epoch_ms(row.get("timestamp"))
+            if timestamp is None:
+                return None
+            return datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).hour
+        if name == "dayofweek":
+            row = (
+                history_rows[bar_index]
+                if history_rows and 0 <= bar_index < len(history_rows)
+                else {}
+            )
+            timestamp = self._timestamp_to_epoch_ms(row.get("timestamp"))
+            if timestamp is None:
+                return None
+            iso_day = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).isoweekday()
+            return 1 if iso_day == 7 else iso_day + 1
+        if name in {"hl2", "hlc3", "ohlc4"} and history_rows and 0 <= bar_index < len(history_rows):
+            row = history_rows[bar_index]
+            high = self._to_number(row.get("high"))
+            low = self._to_number(row.get("low"))
+            close = self._to_number(row.get("close"))
+            open_value = self._to_number(row.get("open"))
+            if name == "hl2" and high is not None and low is not None:
+                return (high + low) / 2
+            if name == "hlc3" and None not in {high, low, close}:
+                return (high + low + close) / 3
+            if name == "ohlc4" and None not in {open_value, high, low, close}:
+                return (open_value + high + low + close) / 4
         if name in self.input_values:
             return self._resolve_input_value(
                 name,
@@ -480,13 +680,35 @@ class DeterministicStrategyRuntime:
             if expression.attr == "position_size":
                 return position.quantity if position else 0
             if expression.attr == "position_avg_price":
-                return position.avg_price if position else None
+                return position.avg_entry_price if position else None
+            if expression.attr == "netprofit":
+                return portfolio.realized_pnl
+            if expression.attr == "closedtrades":
+                return 0
+            if expression.attr == "wintrades":
+                return 0
+            if expression.attr == "opentrades":
+                return 1 if position else 0
             return f"strategy.{expression.attr}"
 
         if base.kind == "name" and base.name == "syminfo":
             if expression.attr == "tickerid":
                 return env_current.get("__symbol__")
+            if expression.attr == "timezone":
+                return "UTC"
             return f"syminfo.{expression.attr}"
+
+        if base.kind == "name" and base.name == "dayofweek":
+            day_map = {
+                "sunday": 1,
+                "monday": 2,
+                "tuesday": 3,
+                "wednesday": 4,
+                "thursday": 5,
+                "friday": 6,
+                "saturday": 7,
+            }
+            return day_map.get(expression.attr, f"dayofweek.{expression.attr}")
 
         if base.kind == "name" and base.name in {
             "color",
@@ -496,6 +718,12 @@ class DeterministicStrategyRuntime:
             "position",
             "barstate",
             "ticker",
+            "display",
+            "extend",
+            "xloc",
+            "barmerge",
+            "plot",
+            "timeframe",
         }:
             return f"{base.name}.{expression.attr}"
 
@@ -529,6 +757,254 @@ class DeterministicStrategyRuntime:
         extra_context: dict[str, Any] | None = None,
     ) -> Any:
         call_path = self._expression_path(expression.callee)
+        if call_path in {
+            "strategy.entry",
+            "strategy.close",
+            "strategy.exit",
+            "strategy.close_all",
+            "strategy.cancel",
+        }:
+            return self._evaluate_strategy_statement_call(
+                call_path,
+                expression,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+
+        if call_path == "math.avg":
+            values = [
+                self._to_number(
+                    self._evaluate_expression(
+                        arg.value,
+                        history_rows,
+                        bar_index,
+                        symbol_state,
+                        portfolio,
+                        env_current,
+                        extra_context=extra_context,
+                    )
+                )
+                for arg in expression.args
+            ]
+            filtered = [value for value in values if value is not None]
+            return sum(filtered) / len(filtered) if filtered else None
+
+        if call_path == "math.pow":
+            left = self._to_number(
+                self._evaluate_expression(
+                    expression.args[0].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            right = self._to_number(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            if left is None or right is None:
+                return None
+            return math.pow(left, right)
+
+        if call_path == "int":
+            value = self._evaluate_expression(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            number = self._to_number(value)
+            return int(number) if number is not None else None
+
+        if call_path == "float":
+            value = self._evaluate_expression(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            return self._to_number(value)
+
+        if call_path in {"heikinashi", "ticker.heikinashi"}:
+            symbol = self._evaluate_expression(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            return {"symbol": symbol or env_current.get("__symbol__"), "transform": "heikinashi"}
+
+        if call_path == "strategy.opentrades.entry_price":
+            symbol = env_current.get("__symbol__")
+            position = portfolio.positions.get(symbol) if portfolio and symbol else None
+            if not position:
+                return None
+            if expression.args:
+                index = self._coerce_number(
+                    self._evaluate_expression(
+                        expression.args[0].value,
+                        history_rows,
+                        bar_index,
+                        symbol_state,
+                        portfolio,
+                        env_current,
+                        extra_context=extra_context,
+                    )
+                )
+                if index not in {None, 0}:
+                    return None
+            return position.avg_entry_price
+
+        if call_path == "array.new_float":
+            size = 0
+            if expression.args:
+                size_value = self._coerce_number(
+                    self._evaluate_expression(
+                        expression.args[0].value,
+                        history_rows,
+                        bar_index,
+                        symbol_state,
+                        portfolio,
+                        env_current,
+                        extra_context=extra_context,
+                    )
+                )
+                size = int(size_value or 0)
+            default_value = 0.0
+            if len(expression.args) > 1:
+                default_value = self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            return [default_value for _ in range(max(size, 0))]
+
+        if call_path == "array.get":
+            array_value = self._evaluate_expression(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            index = self._coerce_number(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            if not isinstance(array_value, list) or index is None:
+                return None
+            idx = int(index)
+            return array_value[idx] if 0 <= idx < len(array_value) else None
+
+        if call_path == "array.set":
+            array_value = self._evaluate_expression(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            index = self._coerce_number(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            value = self._evaluate_expression(
+                expression.args[2].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            if isinstance(array_value, list) and index is not None:
+                idx = int(index)
+                while idx >= len(array_value):
+                    array_value.append(None)
+                if idx >= 0:
+                    array_value[idx] = value
+            return value
+
+        if call_path == "array.push":
+            array_value = self._evaluate_expression(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            value = self._evaluate_expression(
+                expression.args[1].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            if isinstance(array_value, list):
+                array_value.append(value)
+            return value
+
+        if call_path == "array.size":
+            array_value = self._evaluate_expression(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            return len(array_value) if isinstance(array_value, list) else None
+
         if call_path == "math.max":
             values = [
                 self._evaluate_expression(
@@ -707,6 +1183,21 @@ class DeterministicStrategyRuntime:
                 env_current,
                 extra_context=extra_context,
             )
+
+        if call_path == "str.tostring":
+            value = self._evaluate_expression(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            return "" if value is None else str(value)
+
+        if call_path in {"table.new", "table.cell", "line.new"}:
+            return {"call": call_path}
 
         if call_path == "ta.tr":
             return self._true_range(history_rows, bar_index)
@@ -1359,14 +1850,163 @@ class DeterministicStrategyRuntime:
                 env_current,
                 extra_context=extra_context,
             )
-        return self._evaluate_expression(
-            function.body,
+        if function.body is not None and not function.statements:
+            return self._evaluate_expression(
+                function.body,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=local_context,
+            )
+
+        function_state = symbol_state.setdefault("function_persistent_values", {}).setdefault(
+            function_name,
+            {},
+        )
+        local_env = dict(env_current)
+        local_env.update(local_context)
+        control, value = self._execute_statements(
+            function.statements,
             history_rows,
             bar_index,
             symbol_state,
             portfolio,
-            env_current,
-            extra_context=local_context,
+            local_env,
+            persistent_values=function_state,
+        )
+        return value if control == "return" else None
+
+    def _evaluate_strategy_statement_call(
+        self,
+        call_path: str,
+        expression: IRExpression,
+        history_rows: list[dict[str, Any]],
+        bar_index: int,
+        symbol_state: dict[str, Any],
+        portfolio,
+        env_current: dict[str, Any],
+        *,
+        extra_context: dict[str, Any] | None = None,
+    ) -> StrategyOrderAction | None:
+        positional = [arg for arg in expression.args if arg.name is None]
+        named = {arg.name: arg for arg in expression.args if arg.name is not None}
+
+        def evaluated(arg: IRExpression | None):
+            if arg is None:
+                return None
+            return self._evaluate_expression(
+                arg,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+
+        def constant_expr(value: Any) -> IRExpression | None:
+            if value is None:
+                return None
+            return IRExpression(kind="constant", value=value)
+
+        when_value = evaluated(named["when"].value) if "when" in named else True
+        if not self._is_truthy(when_value):
+            return None
+
+        if call_path == "strategy.close_all":
+            return StrategyOrderAction(
+                kind="close_all",
+                orderId="__close_all__",
+                when=IRExpression(kind="constant", value=True),
+            )
+
+        if not positional:
+            return None
+        order_id = evaluated(positional[0].value)
+        if not isinstance(order_id, str):
+            return None
+
+        if call_path == "strategy.cancel":
+            positional_when = evaluated(positional[1].value) if len(positional) > 1 else True
+            if not self._is_truthy(positional_when):
+                return None
+            return StrategyOrderAction(
+                kind="cancel",
+                orderId=order_id,
+                when=IRExpression(kind="constant", value=True),
+            )
+
+        if call_path == "strategy.close":
+            return StrategyOrderAction(
+                kind="close",
+                orderId=order_id,
+                when=IRExpression(kind="constant", value=True),
+            )
+
+        if call_path == "strategy.entry":
+            if len(positional) < 2:
+                return None
+            side_value = evaluated(positional[1].value)
+            side = "long" if side_value in {"strategy.long", True, "long"} else "short"
+            quantity = None
+            quantity_type = None
+            if len(positional) > 2:
+                quantity = constant_expr(evaluated(positional[2].value))
+                quantity_type = "qty"
+            if "qty" in named:
+                quantity = constant_expr(evaluated(named["qty"].value))
+                quantity_type = "qty"
+            elif "qty_percent" in named:
+                quantity = constant_expr(evaluated(named["qty_percent"].value))
+                quantity_type = "qty_percent"
+            elif "cash" in named:
+                quantity = constant_expr(evaluated(named["cash"].value))
+                quantity_type = "cash"
+            return StrategyOrderAction(
+                kind="entry",
+                orderId=order_id,
+                side=side,
+                when=IRExpression(kind="constant", value=True),
+                quantity=quantity,
+                quantityType=quantity_type,
+                stop=constant_expr(evaluated(named["stop"].value)) if "stop" in named else None,
+                limit=constant_expr(evaluated(named["limit"].value)) if "limit" in named else None,
+            )
+
+        from_entry_id = None
+        if len(positional) > 1:
+            from_entry_value = evaluated(positional[1].value)
+            if isinstance(from_entry_value, str):
+                from_entry_id = from_entry_value
+        if "from_entry" in named:
+            from_entry_value = evaluated(named["from_entry"].value)
+            if isinstance(from_entry_value, str):
+                from_entry_id = from_entry_value
+
+        quantity = None
+        quantity_type = None
+        if "qty" in named:
+            quantity = constant_expr(evaluated(named["qty"].value))
+            quantity_type = "qty"
+        elif "qty_percent" in named:
+            quantity = constant_expr(evaluated(named["qty_percent"].value))
+            quantity_type = "qty_percent"
+        elif "cash" in named:
+            quantity = constant_expr(evaluated(named["cash"].value))
+            quantity_type = "cash"
+        return StrategyOrderAction(
+            kind="exit",
+            orderId=order_id,
+            when=IRExpression(kind="constant", value=True),
+            fromEntryId=from_entry_id,
+            quantity=quantity,
+            quantityType=quantity_type,
+            stop=constant_expr(evaluated(named["stop"].value)) if "stop" in named else None,
+            limit=constant_expr(evaluated(named["limit"].value)) if "limit" in named else None,
+            profit=constant_expr(evaluated(named["profit"].value)) if "profit" in named else None,
+            loss=constant_expr(evaluated(named["loss"].value)) if "loss" in named else None,
         )
 
     def _series_values(
@@ -1450,7 +2090,9 @@ class DeterministicStrategyRuntime:
             if target_abs <= 0:
                 return None
             target_position = target_abs if order.side == "long" else -target_abs
-        elif order.kind == "close":
+        elif order.kind == "cancel":
+            return None
+        elif order.kind in {"close", "close_all"}:
             target_position = 0.0
         else:
             if current_position == 0:
@@ -1540,7 +2182,12 @@ class DeterministicStrategyRuntime:
                     order.stop,
                     [],
                     0,
-                    {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                    {
+                        "bar_values": [],
+                        "persistent_values": {},
+                        "security_cache": {},
+                        "function_persistent_values": {},
+                    },
                     None,
                     env_current,
                 )
@@ -1554,7 +2201,12 @@ class DeterministicStrategyRuntime:
                     order.limit,
                     [],
                     0,
-                    {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                    {
+                        "bar_values": [],
+                        "persistent_values": {},
+                        "security_cache": {},
+                        "function_persistent_values": {},
+                    },
                     None,
                     env_current,
                 )
@@ -1570,7 +2222,12 @@ class DeterministicStrategyRuntime:
                         order.loss,
                         [],
                         0,
-                        {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                        {
+                            "bar_values": [],
+                            "persistent_values": {},
+                            "security_cache": {},
+                            "function_persistent_values": {},
+                        },
                         None,
                         env_current,
                     )
@@ -1583,7 +2240,12 @@ class DeterministicStrategyRuntime:
                         order.profit,
                         [],
                         0,
-                        {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                        {
+                            "bar_values": [],
+                            "persistent_values": {},
+                            "security_cache": {},
+                            "function_persistent_values": {},
+                        },
                         None,
                         env_current,
                     )
@@ -1609,8 +2271,10 @@ class DeterministicStrategyRuntime:
         if op == "+":
             if left_number is not None and right_number is not None:
                 return left_number + right_number
-            if isinstance(left, str) and isinstance(right, str):
-                return left + right
+            if isinstance(left, str) and right is not None:
+                return left + str(right)
+            if isinstance(right, str) and left is not None:
+                return str(left) + right
             return None
         if op == "-":
             if left_number is None or right_number is None:
@@ -2126,6 +2790,10 @@ class DeterministicStrategyRuntime:
             extra_context=extra_context,
         )
         current_symbol = env_current.get("__symbol__")
+        transform = None
+        if isinstance(symbol_value, dict):
+            transform = symbol_value.get("transform")
+            symbol_value = symbol_value.get("symbol")
         if symbol_value not in {current_symbol, None}:
             return None
 
@@ -2138,7 +2806,14 @@ class DeterministicStrategyRuntime:
             env_current,
             extra_context=extra_context,
         )
-        resampled_rows = self._resample_history(history_rows, timeframe_value)
+        cache_key = f"{symbol_value or current_symbol}:{timeframe_value}:{transform or 'raw'}"
+        security_cache = symbol_state.setdefault("security_cache", {})
+        resampled_rows = security_cache.get(cache_key)
+        if resampled_rows is None:
+            resampled_rows = self._resample_history(history_rows, timeframe_value)
+            if transform == "heikinashi":
+                resampled_rows = self._apply_heikin_ashi(resampled_rows)
+            security_cache[cache_key] = resampled_rows
         if not resampled_rows:
             return None
 
@@ -2157,6 +2832,7 @@ class DeterministicStrategyRuntime:
             "bar_values": [],
             "persistent_values": {},
             "security_cache": {},
+            "function_persistent_values": {},
         }
         return self._evaluate_expression(
             expression.args[2].value,
@@ -2210,6 +2886,40 @@ class DeterministicStrategyRuntime:
             )
 
         return buckets
+
+    def _apply_heikin_ashi(self, history_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not history_rows:
+            return history_rows
+
+        transformed: list[dict[str, Any]] = []
+        previous_open = None
+        previous_close = None
+        for row in history_rows:
+            open_value = self._to_number(row.get("open"))
+            high_value = self._to_number(row.get("high"))
+            low_value = self._to_number(row.get("low"))
+            close_value = self._to_number(row.get("close"))
+            if any(value is None for value in (open_value, high_value, low_value, close_value)):
+                transformed.append(dict(row))
+                continue
+            ha_close = (open_value + high_value + low_value + close_value) / 4
+            if previous_open is None or previous_close is None:
+                ha_open = (open_value + close_value) / 2
+            else:
+                ha_open = (previous_open + previous_close) / 2
+            transformed_row = dict(row)
+            transformed_row.update(
+                {
+                    "open": ha_open,
+                    "high": max(high_value, ha_open, ha_close),
+                    "low": min(low_value, ha_open, ha_close),
+                    "close": ha_close,
+                }
+            )
+            transformed.append(transformed_row)
+            previous_open = ha_open
+            previous_close = ha_close
+        return transformed
 
     def _parse_timeframe_minutes(self, timeframe: Any) -> int | None:
         if isinstance(timeframe, (int, float)):

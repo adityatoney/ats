@@ -19,7 +19,7 @@ ExpressionKind = Literal[
 ]
 
 AssignmentKind = Literal["assign", "persistent_assign", "reassign"]
-OrderKind = Literal["entry", "close", "exit"]
+OrderKind = Literal["entry", "close", "exit", "close_all", "cancel"]
 DirectionKind = Literal["long", "short", "both"]
 SizingMode = Literal[
     "strategy_default",
@@ -28,6 +28,7 @@ SizingMode = Literal[
     "cash_amount",
     "expression",
 ]
+StatementKind = Literal["assign", "expr", "if", "for_to", "break", "return"]
 
 
 class IRExpression(BaseModel):
@@ -84,10 +85,25 @@ class StrategyCalculation(BaseModel):
     typeHint: str | None = None
 
 
+class IRStatement(BaseModel):
+    kind: StatementKind
+    name: str | None = None
+    expression: IRExpression | None = None
+    assignmentKind: AssignmentKind | None = None
+    typeHint: str | None = None
+    test: IRExpression | None = None
+    body: list["IRStatement"] = Field(default_factory=list)
+    orelse: list["IRStatement"] = Field(default_factory=list)
+    start: IRExpression | None = None
+    end: IRExpression | None = None
+    step: IRExpression | None = None
+
+
 class StrategyFunction(BaseModel):
     name: str
     params: list[str] = Field(default_factory=list)
-    body: IRExpression
+    body: IRExpression | None = None
+    statements: list[IRStatement] = Field(default_factory=list)
 
 
 class StrategySignals(BaseModel):
@@ -129,6 +145,7 @@ class StrategyIR(BaseModel):
     inputs: list[StrategyInput] = Field(default_factory=list)
     functions: list[StrategyFunction] = Field(default_factory=list)
     indicators: list[StrategyCalculation] = Field(default_factory=list)
+    statements: list[IRStatement] = Field(default_factory=list)
     signals: StrategySignals = Field(default_factory=StrategySignals)
     orders: list[StrategyOrderAction] = Field(default_factory=list)
     risk: StrategyRisk = Field(default_factory=StrategyRisk)
@@ -138,3 +155,4 @@ class StrategyIR(BaseModel):
 
 
 IRExpression.model_rebuild()
+IRStatement.model_rebuild()

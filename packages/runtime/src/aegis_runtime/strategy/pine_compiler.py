@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import os
 import re
+import signal
 from collections import OrderedDict
+from contextlib import contextmanager
 
 from aegis_runtime.strategy.diagnostics import (
     StrategyCompileError,
     compile_error,
     parse_error,
+    timeout_error,
 )
 from aegis_runtime.strategy.ir import (
     IRCallArg,
     IRExpression,
+    IRStatement,
     StrategyCalculation,
     StrategyFunction,
     StrategyInput,
@@ -21,6 +26,9 @@ from aegis_runtime.strategy.ir import (
 )
 
 _SCRIPT_VERSION_RE = re.compile(r"//@version=(\d+)")
+_DEFAULT_COMPILE_TIMEOUT_SECONDS = float(
+    os.getenv("AEGIS_PINE_COMPILE_TIMEOUT_SECONDS", "15")
+)
 _SUPPORTED_EXPR_CALLS = {
     "ta.sma",
     "ta.ema",
@@ -51,17 +59,62 @@ _SUPPORTED_EXPR_CALLS = {
     "avg",
     "timestamp",
     "math.abs",
+    "math.avg",
     "math.round",
+    "math.pow",
     "math.max",
     "math.min",
     "na",
     "nz",
+    "int",
+    "float",
+    "array.new_float",
+    "array.get",
+    "array.set",
+    "array.push",
+    "array.size",
+    "heikinashi",
+    "ticker.heikinashi",
+    "strategy.opentrades.entry_price",
     "color.new",
 }
-_SUPPORTED_STRATEGY_CALLS = {"strategy.entry", "strategy.close", "strategy.exit"}
-_SUPPORTED_PLOT_CALLS = {"plot", "plotshape", "bgcolor", "hline"}
-_PASSTHROUGH_CALLS = {"alertcondition", "fill", "table.new", "table.cell", "str.tostring"}
-_PASSTHROUGH_ROOTS = {"table", "alertcondition", "barstate", "str", "position"}
+_SUPPORTED_STRATEGY_CALLS = {
+    "strategy.entry",
+    "strategy.close",
+    "strategy.exit",
+    "strategy.close_all",
+    "strategy.cancel",
+}
+_SUPPORTED_PLOT_CALLS = {
+    "plot",
+    "plotshape",
+    "plotchar",
+    "plotcandle",
+    "bgcolor",
+    "hline",
+}
+_PASSTHROUGH_CALLS = {
+    "alertcondition",
+    "fill",
+    "table.new",
+    "table.cell",
+    "str.tostring",
+    "line.new",
+    "label.new",
+}
+_PASSTHROUGH_ROOTS = {
+    "table",
+    "alertcondition",
+    "barstate",
+    "str",
+    "position",
+    "line",
+    "label",
+    "display",
+    "extend",
+    "xloc",
+    "barmerge",
+}
 _CALL_ALIASES = {
     "sma": "ta.sma",
     "ema": "ta.ema",
@@ -90,6 +143,7 @@ _CALL_ALIASES = {
     "cross": "ta.cross",
     "abs": "math.abs",
     "round": "math.round",
+    "pow": "math.pow",
     "max": "math.max",
     "min": "math.min",
 }
@@ -173,20 +227,29 @@ def _load_pynescript():
 def parse_pine_source(source: str) -> StrategyIR:
     api = _load_pynescript()
     parse = api["parse"]
+    sanitized_source = _strip_comments_preserve_layout(source)
     try:
-        module = parse(source)
+        with _compile_timeout():
+            module = parse(sanitized_source)
+    except TimeoutError as exc:
+        raise timeout_error() from exc
     except Exception as exc:
         raise parse_error(str(exc)) from exc
 
     compiler = _PineLowerer(source=source, api=api)
-    return compiler.lower(module)
+    try:
+        with _compile_timeout():
+            return compiler.lower(module)
+    except TimeoutError as exc:
+        raise timeout_error() from exc
 
 
 def parse_pine_expression(expression: str) -> IRExpression:
     api = _load_pynescript()
     parse = api["parse"]
     try:
-        module = parse(f"tmp_expr = {expression}")
+        with _compile_timeout():
+            module = parse(f"tmp_expr = {expression}")
     except Exception as exc:
         raise StrategyCompileError(f"Failed to parse Pine expression: {exc}") from exc
 
@@ -199,6 +262,57 @@ def parse_pine_expression(expression: str) -> IRExpression:
     return compiler.lower_expression(value)
 
 
+@contextmanager
+def _compile_timeout(seconds: float = _DEFAULT_COMPILE_TIMEOUT_SECONDS):
+    if seconds <= 0 or not hasattr(signal, "setitimer"):
+        yield
+        return
+
+    def _handle_timeout(signum, frame):
+        raise TimeoutError("compile timeout")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer != (0.0, 0.0):
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
+def _strip_comments_preserve_layout(source: str) -> str:
+    lines: list[str] = []
+    for line in source.splitlines():
+        in_single = False
+        in_double = False
+        comment_index = None
+        idx = 0
+        while idx < len(line):
+            char = line[idx]
+            if char == '"' and not in_single:
+                in_double = not in_double
+            elif char == "'" and not in_double:
+                in_single = not in_single
+            elif (
+                char == "/"
+                and not in_single
+                and not in_double
+                and idx + 1 < len(line)
+                and line[idx + 1] == "/"
+            ):
+                comment_index = idx
+                break
+            idx += 1
+        if comment_index is None:
+            lines.append(line)
+        else:
+            lines.append(line[:comment_index])
+    return "\n".join(lines) + ("\n" if source.endswith("\n") else "")
+
+
 class _PineLowerer:
     def __init__(self, source: str, api: dict[str, object]):
         self.source = source
@@ -209,6 +323,7 @@ class _PineLowerer:
         self.inputs: list[StrategyInput] = []
         self.functions: list[StrategyFunction] = []
         self.calculations: list[StrategyCalculation] = []
+        self.statements: list[IRStatement] = []
         self.orders: list[StrategyOrderAction] = []
         self.plots: list[StrategyPlot] = []
         self.passthrough: list[str] = []
@@ -252,6 +367,7 @@ class _PineLowerer:
             inputs=self.inputs,
             functions=self.functions,
             indicators=self.calculations,
+            statements=self.statements,
             signals={
                 "entry": entry_signals,
                 "exit": exit_signals,
@@ -267,6 +383,9 @@ class _PineLowerer:
         ReAssign = self.api["ReAssign"]
 
         if isinstance(statement, Expr):
+            if type(statement.value).__name__ == "ForTo":
+                self.statements.append(self._lower_for_to(statement.value))
+                return
             self._lower_expr_statement(statement.value, statement)
             return
 
@@ -275,12 +394,12 @@ class _PineLowerer:
             return
 
         if isinstance(statement, ReAssign):
-            self.calculations.append(
+            self._append_calculation(
                 StrategyCalculation(
                     name=self._require_name(statement.target, statement),
                     expression=self.lower_expression(statement.value),
                     kind="reassign",
-                )
+                ),
             )
             return
 
@@ -297,6 +416,9 @@ class _PineLowerer:
     def _lower_expr_statement(self, expr, statement) -> None:
         Call = self.api["Call"]
 
+        if type(expr).__name__ == "Name":
+            return
+
         if isinstance(expr, Call):
             call_path = self._normalize_call_path(self._call_path(expr.func))
             if call_path == "strategy":
@@ -310,12 +432,16 @@ class _PineLowerer:
                     )
                 )
                 return
-            if call_path in _PASSTHROUGH_CALLS:
+            if call_path in {"alertcondition", "fill"}:
                 self.passthrough.append(self.unparse(statement).strip())
                 return
             if call_path in _SUPPORTED_STRATEGY_CALLS:
                 self._append_order(expr, self._true_expression())
                 return
+            self.statements.append(
+                IRStatement(kind="expr", expression=self.lower_expression(expr))
+            )
+            return
 
         if type(expr).__name__ == "If":
             if self._is_passthrough_if(expr):
@@ -324,7 +450,7 @@ class _PineLowerer:
             if self._if_contains_only_order_calls(expr):
                 self._lower_conditional_orders(expr)
             else:
-                self._lower_conditional_assignments(expr)
+                self.statements.append(self._lower_if_statement(expr))
             return
 
         raise compile_error(
@@ -347,7 +473,7 @@ class _PineLowerer:
             if self._is_supported_input_call(call_path):
                 self.inputs.append(self._lower_input(statement))
                 return
-            if call_path == "table.new":
+            if call_path in {"table.new", "line.new"}:
                 self.passthrough.append(self.unparse(statement).strip())
                 return
 
@@ -365,17 +491,14 @@ class _PineLowerer:
             if getattr(statement, "type", None) is not None:
                 type_hint = self.unparse(statement.type).strip()
 
-            calculation = StrategyCalculation(
-                name=assignment_name,
-                expression=self.lower_expression(statement.value),
-                kind=kind,
-                typeHint=type_hint,
+            self._append_calculation(
+                StrategyCalculation(
+                    name=assignment_name,
+                    expression=self.lower_expression(statement.value),
+                    kind=kind,
+                    typeHint=type_hint,
+                )
             )
-            self.calculations.append(calculation)
-
-            literal_value = self._try_literal_value(statement.value)
-            if literal_value is not None:
-                self.literal_bindings[calculation.name] = literal_value
         finally:
             self._active_input_replacements = previous_replacements
 
@@ -386,7 +509,7 @@ class _PineLowerer:
         ]
         value_expr = self.lower_expression(statement.value)
         for index, name in enumerate(target_names):
-            self.calculations.append(
+            self._append_calculation(
                 StrategyCalculation(
                     name=name,
                     expression=IRExpression(
@@ -394,8 +517,30 @@ class _PineLowerer:
                         base=value_expr,
                         index=IRExpression(kind="constant", value=index),
                     ),
-                )
+                ),
             )
+
+    def _append_calculation(self, calculation: StrategyCalculation) -> None:
+        self.calculations.append(calculation)
+        self.statements.append(
+            IRStatement(
+                kind="assign",
+                name=calculation.name,
+                expression=calculation.expression,
+                assignmentKind=calculation.kind,
+                typeHint=calculation.typeHint,
+            )
+        )
+
+        literal_value = self._try_literal_value_from_ir(calculation.expression)
+        if literal_value is not None:
+            self.literal_bindings[calculation.name] = literal_value
+
+    def _try_literal_value_from_ir(self, expression: IRExpression):
+        try:
+            return self._literal_from_ir(expression)
+        except StrategyCompileError:
+            return None
 
     def _is_supported_input_call(self, call_path: str) -> bool:
         return call_path == "input" or call_path.startswith("input.")
@@ -432,54 +577,182 @@ class _PineLowerer:
 
     def _lower_function_def(self, statement) -> None:
         params = [param.name for param in getattr(statement, "args", [])]
-        body = self._lower_function_body(getattr(statement, "body", []), statement)
+        function_statements = self._lower_statement_block(
+            getattr(statement, "body", []),
+            allow_order_calls=True,
+            implicit_return=True,
+        )
+        body = None
+        if len(function_statements) == 1 and function_statements[0].kind == "return":
+            body = function_statements[0].expression
         self.functions.append(
             StrategyFunction(
                 name=statement.name,
                 params=params,
+                statements=function_statements,
                 body=body,
             )
         )
 
-    def _lower_function_body(self, body, error_node) -> IRExpression:
-        if len(body) != 1:
-            raise compile_error(
-                "unsupported_function_body",
-                "Only single-expression Pine function bodies are supported",
-                error_node,
+    def _lower_statement_block(
+        self,
+        statements,
+        *,
+        allow_order_calls: bool,
+        implicit_return: bool = False,
+    ) -> list[IRStatement]:
+        lowered: list[IRStatement] = []
+        for index, statement in enumerate(statements):
+            item = self._lower_ir_statement(
+                statement,
+                allow_order_calls=allow_order_calls,
+                implicit_return=implicit_return and index == len(statements) - 1,
             )
-        expression_stmt = body[0]
-        if type(expression_stmt).__name__ != "Expr":
-            raise compile_error(
-                "unsupported_function_body",
-                "Only expression-based Pine function bodies are supported",
-                error_node,
-            )
-        value = expression_stmt.value
-        if type(value).__name__ == "If":
-            return self._lower_function_if(value)
-        return self.lower_expression(value)
+            if item is None:
+                continue
+            if isinstance(item, list):
+                lowered.extend(item)
+            else:
+                lowered.append(item)
+        return lowered
 
-    def _lower_function_if(self, if_node) -> IRExpression:
-        if len(if_node.body) != 1 or len(getattr(if_node, "orelse", []) or []) != 1:
-            raise compile_error(
-                "unsupported_function_if",
-                "Pine function if/else bodies must have exactly one expression per branch",
-                if_node,
+    def _lower_ir_statement(
+        self,
+        statement,
+        *,
+        allow_order_calls: bool,
+        implicit_return: bool = False,
+    ):
+        Assign = self.api["Assign"]
+        ReAssign = self.api["ReAssign"]
+        Expr = self.api["Expr"]
+
+        if type(statement).__name__ == "Break":
+            return IRStatement(kind="break")
+
+        if isinstance(statement, Assign):
+            if type(statement.target).__name__ == "Tuple":
+                target_names = [
+                    self._require_name(element, statement)
+                    for element in getattr(statement.target, "elts", [])
+                ]
+                value_expr = self.lower_expression(statement.value)
+                return [
+                    IRStatement(
+                        kind="assign",
+                        name=name,
+                        expression=IRExpression(
+                            kind="subscript",
+                            base=value_expr,
+                            index=IRExpression(kind="constant", value=index),
+                        ),
+                        assignmentKind="assign",
+                    )
+                    for index, name in enumerate(target_names)
+                ]
+            return IRStatement(
+                kind="assign",
+                name=self._require_name(statement.target, statement),
+                expression=self.lower_expression(statement.value),
+                assignmentKind=(
+                    "persistent_assign"
+                    if type(getattr(statement, "mode", None)).__name__ == "Var"
+                    else "assign"
+                ),
+                typeHint=self.unparse(statement.type).strip()
+                if getattr(statement, "type", None) is not None
+                else None,
             )
-        true_branch = if_node.body[0]
-        false_branch = if_node.orelse[0]
-        if type(true_branch).__name__ != "Expr" or type(false_branch).__name__ != "Expr":
-            raise compile_error(
-                "unsupported_function_if",
-                "Pine function if/else branches must be expression statements",
-                if_node,
+
+        if isinstance(statement, ReAssign):
+            return IRStatement(
+                kind="assign",
+                name=self._require_name(statement.target, statement),
+                expression=self.lower_expression(statement.value),
+                assignmentKind="reassign",
             )
-        return IRExpression(
-            kind="ternary",
+
+        if isinstance(statement, Expr):
+            value = statement.value
+            if type(value).__name__ == "If":
+                return self._lower_if_statement(
+                    value,
+                    allow_order_calls=allow_order_calls,
+                    implicit_return=implicit_return,
+                )
+            if type(value).__name__ == "ForTo":
+                return self._lower_for_to(
+                    value,
+                    allow_order_calls=allow_order_calls,
+                    implicit_return=implicit_return,
+                )
+            if type(value).__name__ == "Break":
+                return IRStatement(kind="break")
+            if type(value).__name__ == "Name":
+                if implicit_return:
+                    return IRStatement(kind="return", expression=self.lower_expression(value))
+                return None
+            if isinstance(value, self.api["Call"]):
+                call_path = self._normalize_call_path(self._call_path(value.func))
+                if not allow_order_calls and call_path in _SUPPORTED_STRATEGY_CALLS:
+                    raise compile_error(
+                        "unsupported_statement_call",
+                        f"Unsupported strategy call in this context: {call_path}",
+                        value,
+                    )
+                return IRStatement(kind="expr", expression=self.lower_expression(value))
+            if implicit_return:
+                return IRStatement(kind="return", expression=self.lower_expression(value))
+            return IRStatement(kind="expr", expression=self.lower_expression(value))
+
+        raise compile_error(
+            "unsupported_statement",
+            f"Unsupported Pine statement: {type(statement).__name__}",
+            statement,
+        )
+
+    def _lower_if_statement(
+        self,
+        if_node,
+        *,
+        allow_order_calls: bool = True,
+        implicit_return: bool = False,
+    ) -> IRStatement:
+        return IRStatement(
+            kind="if",
             test=self.lower_expression(if_node.test),
-            body=self.lower_expression(true_branch.value),
-            orelse=self.lower_expression(false_branch.value),
+            body=self._lower_statement_block(
+                getattr(if_node, "body", []),
+                allow_order_calls=allow_order_calls,
+                implicit_return=implicit_return,
+            ),
+            orelse=self._lower_statement_block(
+                getattr(if_node, "orelse", []) or [],
+                allow_order_calls=allow_order_calls,
+                implicit_return=implicit_return,
+            )
+            if getattr(if_node, "orelse", None)
+            else [],
+        )
+
+    def _lower_for_to(
+        self,
+        for_node,
+        *,
+        allow_order_calls: bool = True,
+        implicit_return: bool = False,
+    ) -> IRStatement:
+        return IRStatement(
+            kind="for_to",
+            name=self._require_name(for_node.target, for_node),
+            start=self.lower_expression(for_node.start),
+            end=self.lower_expression(for_node.end),
+            step=self.lower_expression(for_node.step) if getattr(for_node, "step", None) else None,
+            body=self._lower_statement_block(
+                getattr(for_node, "body", []),
+                allow_order_calls=allow_order_calls,
+                implicit_return=implicit_return,
+            ),
         )
 
     def _next_synthetic_input_name(self, assignment_name: str) -> str:
@@ -825,6 +1098,31 @@ class _PineLowerer:
     def _append_order(self, call, when: IRExpression) -> None:
         call_path = self._normalize_call_path(self._call_path(call.func))
         args = list(call.args)
+        if call_path == "strategy.close_all":
+            order_when = when
+            for arg in args:
+                if arg.name == "when":
+                    order_when = self._combine_conditions(
+                        order_when,
+                        self.lower_expression(arg.value),
+                    )
+                elif arg.name in {"comment", "alert_message"}:
+                    continue
+                elif arg.name is not None:
+                    raise compile_error(
+                        "unsupported_strategy_close_all_arg",
+                        f"Unsupported strategy.close_all() argument: {arg.name}",
+                        arg.value,
+                    )
+            self.orders.append(
+                StrategyOrderAction(
+                    kind="close_all",
+                    orderId="__close_all__",
+                    when=order_when,
+                )
+            )
+            return
+
         if not args:
             raise compile_error(
                 "invalid_order",
@@ -847,8 +1145,13 @@ class _PineLowerer:
             side = self._resolve_entry_side(args[1].value)
             quantity = None
             quantity_type = None
-            for arg in args[2:]:
-                if arg.name == "qty":
+            stop = None
+            limit = None
+            for index, arg in enumerate(args[2:], start=2):
+                if arg.name is None and quantity is None:
+                    quantity = self.lower_expression(arg.value)
+                    quantity_type = "qty"
+                elif arg.name == "qty":
                     quantity = self.lower_expression(arg.value)
                     quantity_type = "qty"
                 elif arg.name == "qty_percent":
@@ -857,6 +1160,10 @@ class _PineLowerer:
                 elif arg.name == "cash":
                     quantity = self.lower_expression(arg.value)
                     quantity_type = "cash"
+                elif arg.name == "stop":
+                    stop = self.lower_expression(arg.value)
+                elif arg.name == "limit":
+                    limit = self.lower_expression(arg.value)
                 elif arg.name == "when":
                     order_when = self._combine_conditions(
                         order_when,
@@ -879,6 +1186,8 @@ class _PineLowerer:
                     when=order_when,
                     quantity=quantity,
                     quantityType=quantity_type,
+                    stop=stop,
+                    limit=limit,
                 )
             )
             return
@@ -901,6 +1210,38 @@ class _PineLowerer:
             self.orders.append(
                 StrategyOrderAction(
                     kind="close",
+                    orderId=order_id,
+                    when=order_when,
+                )
+            )
+            return
+
+        if call_path == "strategy.cancel":
+            order_when = when
+            if len(args) > 1:
+                second = args[1]
+                if second.name is None:
+                    order_when = self._combine_conditions(
+                        order_when,
+                        self.lower_expression(second.value),
+                    )
+            for arg in args[1:]:
+                if arg.name == "when":
+                    order_when = self._combine_conditions(
+                        order_when,
+                        self.lower_expression(arg.value),
+                    )
+                elif arg.name in {"comment", "alert_message"}:
+                    continue
+                elif arg.name is not None:
+                    raise compile_error(
+                        "unsupported_strategy_cancel_arg",
+                        f"Unsupported strategy.cancel() argument: {arg.name}",
+                        arg.value,
+                    )
+            self.orders.append(
+                StrategyOrderAction(
+                    kind="cancel",
                     orderId=order_id,
                     when=order_when,
                 )
@@ -936,6 +1277,8 @@ class _PineLowerer:
                     loss = self.lower_expression(arg.value)
                 elif arg.name == "from_entry":
                     from_entry_id = self._literal_value(arg.value, call)
+                elif arg.name in {"trail_points", "trail_offset"}:
+                    continue
                 elif arg.name in {"comment", "alert_message"}:
                     continue
                 elif arg.name is not None:
@@ -1010,6 +1353,7 @@ class _PineLowerer:
                 )
             if (
                 call_path not in _SUPPORTED_EXPR_CALLS
+                and call_path not in _SUPPORTED_STRATEGY_CALLS
                 and call_path not in _SUPPORTED_PLOT_CALLS
                 and call_path not in _PASSTHROUGH_CALLS
                 and call_path not in {function.name for function in self.functions}
@@ -1086,6 +1430,9 @@ class _PineLowerer:
                 orelse=self.lower_expression(node.orelse),
             )
 
+        if type(node).__name__ == "Switch":
+            return self._lower_switch(node)
+
         if isinstance(node, Tuple) or type(node).__name__ == "List":
             return IRExpression(
                 kind="tuple",
@@ -1111,6 +1458,35 @@ class _PineLowerer:
             f"Unsupported Pine expression: {type(node).__name__}",
             node,
         )
+
+    def _lower_switch(self, node) -> IRExpression:
+        subject = self.lower_expression(node.subject)
+        default_expression = IRExpression(kind="constant", value=None)
+        for case in reversed(getattr(node, "cases", [])):
+            body = getattr(case, "body", [])
+            if len(body) != 1 or type(body[0]).__name__ != "Expr":
+                raise compile_error(
+                    "unsupported_switch_case",
+                    "switch cases must contain exactly one expression",
+                    case,
+                )
+            branch_expression = self.lower_expression(body[0].value)
+            if getattr(case, "pattern", None) is None:
+                default_expression = branch_expression
+                continue
+            test_expression = IRExpression(
+                kind="comparison",
+                left=subject,
+                ops=["=="],
+                comparators=[self.lower_expression(case.pattern)],
+            )
+            default_expression = IRExpression(
+                kind="ternary",
+                test=test_expression,
+                body=branch_expression,
+                orelse=default_expression,
+            )
+        return default_expression
 
     def _expression_path(self, node) -> str:
         if type(node).__name__ == "Name":
@@ -1221,7 +1597,11 @@ def render_strategy_ir_to_pine(strategy_ir: StrategyIR) -> str:
         for function in strategy_ir.functions:
             lines.append(_render_function(function))
 
-    if strategy_ir.indicators:
+    if strategy_ir.statements:
+        lines.append("")
+        for statement in strategy_ir.statements:
+            lines.extend(_render_statement(statement))
+    elif strategy_ir.indicators:
         lines.append("")
         for calculation in strategy_ir.indicators:
             lines.append(_render_calculation(calculation))
@@ -1325,7 +1705,13 @@ def _render_input(input_def: StrategyInput) -> str:
 
 def _render_function(function: StrategyFunction) -> str:
     params = ", ".join(function.params)
-    return f"{function.name}({params}) => {render_expression(function.body)}"
+    if function.body is not None and not function.statements:
+        return f"{function.name}({params}) => {render_expression(function.body)}"
+
+    lines = [f"{function.name}({params}) =>"]
+    for statement in function.statements:
+        lines.extend(f"    {line}" for line in _render_statement(statement))
+    return "\n".join(lines)
 
 
 def _render_calculation(calculation: StrategyCalculation) -> str:
@@ -1355,11 +1741,24 @@ def _render_order_call(order: StrategyOrderAction) -> str:
             f"strategy.{order.side}",
         ]
         if order.quantity is not None and order.quantityType is not None:
-            args.append(f"{order.quantityType}={render_expression(order.quantity)}")
+            if order.quantityType == "qty":
+                args.append(render_expression(order.quantity))
+            else:
+                args.append(f"{order.quantityType}={render_expression(order.quantity)}")
+        if order.stop is not None:
+            args.append(f"stop={render_expression(order.stop)}")
+        if order.limit is not None:
+            args.append(f"limit={render_expression(order.limit)}")
         return f"strategy.entry({', '.join(args)})"
 
     if order.kind == "close":
         return f"strategy.close({_render_constant(order.orderId)})"
+
+    if order.kind == "close_all":
+        return "strategy.close_all()"
+
+    if order.kind == "cancel":
+        return f"strategy.cancel({_render_constant(order.orderId)})"
 
     args = [_render_constant(order.orderId)]
     if order.fromEntryId:
@@ -1407,3 +1806,48 @@ def _unique_expressions(expressions: list[IRExpression]) -> list[IRExpression]:
     for expression in expressions:
         unique.setdefault(render_expression(expression), expression)
     return list(unique.values())
+
+
+def _render_statement(statement: IRStatement) -> list[str]:
+    if statement.kind == "assign":
+        expression = render_expression(statement.expression)
+        if statement.assignmentKind == "persistent_assign":
+            type_hint = f"{statement.typeHint} " if statement.typeHint else ""
+            return [f"var {type_hint}{statement.name} = {expression}"]
+        if statement.assignmentKind == "reassign":
+            return [f"{statement.name} := {expression}"]
+        type_prefix = f"{statement.typeHint} " if statement.typeHint else ""
+        return [f"{type_prefix}{statement.name} = {expression}"]
+
+    if statement.kind == "expr":
+        return [render_expression(statement.expression)]
+
+    if statement.kind == "return":
+        return [render_expression(statement.expression)]
+
+    if statement.kind == "break":
+        return ["break"]
+
+    if statement.kind == "if":
+        lines = [f"if {render_expression(statement.test)}"]
+        if statement.body:
+            for child in statement.body:
+                lines.extend(f"    {line}" for line in _render_statement(child))
+        else:
+            lines.append("    na")
+        if statement.orelse:
+            lines.append("else")
+            for child in statement.orelse:
+                lines.extend(f"    {line}" for line in _render_statement(child))
+        return lines
+
+    if statement.kind == "for_to":
+        loop = f"for {statement.name} = {render_expression(statement.start)} to {render_expression(statement.end)}"
+        if statement.step is not None:
+            loop += f" by {render_expression(statement.step)}"
+        lines = [loop]
+        for child in statement.body:
+            lines.extend(f"    {line}" for line in _render_statement(child))
+        return lines
+
+    raise ValueError(f"Unsupported IR statement kind: {statement.kind}")

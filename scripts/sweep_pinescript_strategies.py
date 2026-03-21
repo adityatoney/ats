@@ -4,70 +4,70 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import pathlib
-import subprocess
+import signal
 import sys
-import textwrap
+from time import perf_counter
 from collections import Counter, defaultdict
 
+from aegis_runtime.strategy.pine_compiler import parse_pine_source, render_strategy_ir_to_pine
+from aegis_runtime.strategy.python_renderer import render_python_from_ir
+from aegis_runtime.strategy.validator import StrategyValidator
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-RUNTIME_DIR = REPO_ROOT / "packages" / "runtime"
 DEFAULT_STRATEGY_ROOT = pathlib.Path("/tmp/pinescript-strategies/strategies")
 
-WORKER_SCRIPT = textwrap.dedent(
-    """
-    from pathlib import Path
-    import json
-    import sys
 
-    from aegis_runtime.strategy.pine_compiler import parse_pine_source, render_strategy_ir_to_pine
-    from aegis_runtime.strategy.python_renderer import render_python_from_ir
-    from aegis_runtime.strategy.validator import StrategyValidator
+class _SweepTimeoutError(TimeoutError):
+    pass
 
-    source = Path(sys.argv[1]).read_text()
-    strategy_ir = parse_pine_source(source)
-    render_strategy_ir_to_pine(strategy_ir)
-    strategy_py, _ = render_python_from_ir(strategy_ir)
-    StrategyValidator.validate(strategy_py)
-    print(json.dumps({"status": "ok"}))
-    """
-).strip()
+
+def _compile_one(pine_file: pathlib.Path, timeout_seconds: int) -> dict[str, object]:
+    def _handle_timeout(signum, frame):
+        raise _SweepTimeoutError()
+
+    start = perf_counter()
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        source = pine_file.read_text()
+        strategy_ir = parse_pine_source(source)
+        render_strategy_ir_to_pine(strategy_ir)
+        strategy_py, _ = render_python_from_ir(strategy_ir)
+        StrategyValidator.validate(strategy_py)
+        return {
+            "status": "ok",
+            "elapsedSeconds": round(perf_counter() - start, 6),
+        }
+    except _SweepTimeoutError:
+        return {
+            "status": "timeout",
+            "code": "compile_timeout",
+            "message": f"Timed out after {timeout_seconds}s",
+        }
+    except Exception as exc:
+        diagnostics = getattr(exc, "diagnostics", None) or []
+        diagnostic = diagnostics[0].model_dump(mode="json") if diagnostics else None
+        result = {
+            "status": "error",
+            "message": str(exc),
+            "elapsedSeconds": round(perf_counter() - start, 6),
+        }
+        if diagnostic is not None:
+            result["diagnostic"] = diagnostic
+            result["code"] = diagnostic.get("code")
+        return result
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def sweep(strategy_root: pathlib.Path, timeout_seconds: int) -> dict[str, object]:
     results: list[dict[str, object]] = []
-    env = {**os.environ, "PYTHONPATH": "src"}
     for pine_file in sorted(strategy_root.rglob("*.pine")):
         rel_path = pine_file.relative_to(strategy_root).as_posix()
-        try:
-            completed = subprocess.run(
-                ["uv", "run", "--extra", "dev", "python", "-c", WORKER_SCRIPT, str(pine_file)],
-                cwd=RUNTIME_DIR,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
-        except subprocess.TimeoutExpired:
-            results.append(
-                {
-                    "file": rel_path,
-                    "status": "timeout",
-                    "message": f"Timed out after {timeout_seconds}s",
-                }
-            )
-            continue
-
-        if completed.returncode == 0:
-            results.append({"file": rel_path, "status": "ok"})
-            continue
-
-        stderr = (completed.stderr or "").strip()
-        stdout = (completed.stdout or "").strip()
-        message = stderr or stdout or f"Worker failed with exit code {completed.returncode}"
-        results.append({"file": rel_path, "status": "error", "message": message})
+        results.append({"file": rel_path, **_compile_one(pine_file, timeout_seconds)})
 
     summary = Counter(item["status"] for item in results)
     by_folder: dict[str, dict[str, int]] = {}
@@ -79,7 +79,7 @@ def sweep(strategy_root: pathlib.Path, timeout_seconds: int) -> dict[str, object
         folder = pathlib.Path(item["file"]).parts[0] if "/" in item["file"] else "."
         folder_counts[folder][item["status"]] += 1
         if item["status"] != "ok":
-            errors[str(item.get("message", ""))] += 1
+            errors[str(item.get("code") or item.get("message", ""))] += 1
 
     for folder, counts in folder_counts.items():
         by_folder[folder] = dict(counts)

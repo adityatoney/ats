@@ -59,6 +59,18 @@ def compile_error(code: str, message: str, node=None) -> StrategyCompileError:
 _PARSE_LINE_RE = re.compile(r"line (?P<line>\d+)")
 
 
+def timeout_error(message: str = "Deterministic Pine compilation timed out") -> StrategyCompileError:
+    return StrategyCompileError(
+        message,
+        diagnostics=[
+            StrategyDiagnostic(
+                code="compile_timeout",
+                message=message,
+            )
+        ],
+    )
+
+
 def parse_error(message: str) -> StrategyCompileError:
     lines = message.splitlines()
     span = None

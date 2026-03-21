@@ -204,6 +204,54 @@ if close > open
 strategy.entry("Long", strategy.long, when=last_trade_was_loss)
 """
 
+FUNCTION_LOOP_PINE = """//@version=5
+strategy("Function Loop", overlay=true)
+sum_recent(src, lookback) =>
+    total = 0.0
+    for i = 0 to lookback - 1
+        total := total + src[i]
+    total
+
+recent_sum = sum_recent(close, 2)
+strategy.entry("Long", strategy.long, when=recent_sum > close)
+"""
+
+ARRAY_LOOP_PINE = """//@version=5
+strategy("Array Loop", overlay=true)
+items = array.new_float(2)
+for i = 0 to 1
+    array.set(items, i, close[i])
+second_close = array.get(items, 1)
+strategy.entry("Long", strategy.long, when=second_close < close)
+"""
+
+HEIKIN_SECURITY_PINE = """//@version=5
+strategy("Heikin Security", overlay=true)
+ha = ticker.heikinashi(syminfo.tickerid)
+ha_close = request.security(ha, "60", close)
+strategy.entry("Long", strategy.long, when=close > ha_close)
+"""
+
+OPEN_TRADES_PINE = """//@version=5
+strategy("Open Trades", overlay=true)
+last_entry = strategy.opentrades.entry_price(0)
+go_long = close > open
+strategy.entry("Long", strategy.long, when=go_long)
+strategy.close("Long", when=close < nz(last_entry, close))
+"""
+
+SWITCH_PINE = """//@version=5
+strategy("Switch Strategy", overlay=true)
+pick(tf) =>
+    switch tf
+        "60" => "240"
+        "240" => "D"
+        => "Auto"
+
+res = pick(timeframe.period)
+strategy.entry("Long", strategy.long, when=res == "Auto")
+"""
+
 
 def test_compile_ma_fixture_round_trips_through_ir_and_generated_python():
     source = MA_FIXTURE.read_text()
@@ -433,7 +481,7 @@ def test_compile_top_level_conditional_reassigns():
     strategy_ir = parse_pine_source(CONDITIONAL_REASSIGN_PINE)
     generated_python, _ = render_python_from_ir(strategy_ir)
 
-    assert any(calc.kind == "reassign" for calc in strategy_ir.indicators)
+    assert any(statement.kind == "if" for statement in strategy_ir.statements)
     StrategyValidator.validate(generated_python)
 
 
@@ -450,3 +498,51 @@ entryLong =
     assert diagnostic.code == "parse_error"
     assert diagnostic.span is not None
     assert diagnostic.span.line in {3, 4}
+
+
+def test_compile_statement_body_function_with_loop():
+    strategy_ir = parse_pine_source(FUNCTION_LOOP_PINE)
+    normalized_pine = render_strategy_ir_to_pine(strategy_ir)
+    generated_python, _ = render_python_from_ir(strategy_ir)
+
+    function = strategy_ir.functions[0]
+    assert function.body is None
+    assert any(statement.kind == "for_to" for statement in function.statements)
+    assert "sum_recent(src, lookback) =>" in normalized_pine
+    StrategyValidator.validate(generated_python)
+
+
+def test_compile_array_loop_strategy():
+    strategy_ir = parse_pine_source(ARRAY_LOOP_PINE)
+    normalized_pine = render_strategy_ir_to_pine(strategy_ir)
+    generated_python, _ = render_python_from_ir(strategy_ir)
+
+    assert any(statement.kind == "for_to" for statement in strategy_ir.statements)
+    assert "array.set(items, i, close[i])" in normalized_pine
+    StrategyValidator.validate(generated_python)
+
+
+def test_compile_heikin_ashi_request_security_strategy():
+    strategy_ir = parse_pine_source(HEIKIN_SECURITY_PINE)
+    normalized_pine = render_strategy_ir_to_pine(strategy_ir)
+
+    assert any(calc.name == "ha_close" for calc in strategy_ir.indicators)
+    assert "ha = ticker.heikinashi(syminfo.tickerid)" in normalized_pine
+    assert 'ha_close = request.security(ha, "60", close)' in normalized_pine
+
+
+def test_compile_open_trades_entry_price_strategy():
+    strategy_ir = parse_pine_source(OPEN_TRADES_PINE)
+    normalized_pine = render_strategy_ir_to_pine(strategy_ir)
+    generated_python, _ = render_python_from_ir(strategy_ir)
+
+    assert "strategy.opentrades.entry_price(0)" in normalized_pine
+    StrategyValidator.validate(generated_python)
+
+
+def test_compile_switch_expression_strategy():
+    strategy_ir = parse_pine_source(SWITCH_PINE)
+    normalized_pine = render_strategy_ir_to_pine(strategy_ir)
+
+    assert "pick(tf) =>" in normalized_pine
+    assert 'res = pick(timeframe.period)' in normalized_pine
