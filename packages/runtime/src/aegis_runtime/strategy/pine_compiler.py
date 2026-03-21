@@ -801,6 +801,10 @@ class _PineLowerer:
             self._optional_literal(named_args.pop("default_qty_value", None), 100.0)
         )
 
+        pyramiding = int(
+            self._optional_literal(named_args.pop("pyramiding", None), 0)
+        )
+
         additional_args = OrderedDict()
         for arg_name, arg_value in named_args.items():
             additional_args[arg_name] = self.lower_expression(arg_value)
@@ -812,6 +816,7 @@ class _PineLowerer:
             initialCapital=initial_capital,
             defaultQtyType=default_qty_type,
             defaultQtyValue=default_qty_value,
+            pyramiding=pyramiding,
             additionalArgs=additional_args,
         )
 
@@ -1684,6 +1689,8 @@ def _render_strategy_call(meta: StrategyMeta) -> str:
     args.append(f"initial_capital={_render_constant(meta.initialCapital)}")
     args.append(f"default_qty_type=strategy.{meta.defaultQtyType}")
     args.append(f"default_qty_value={_render_constant(meta.defaultQtyValue)}")
+    if meta.pyramiding != 0:
+        args.append(f"pyramiding={_render_constant(meta.pyramiding)}")
     for key, value in sorted(meta.additionalArgs.items()):
         args.append(f"{key}={render_expression(value)}")
     return f"strategy({', '.join(args)})"
