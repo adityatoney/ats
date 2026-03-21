@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../ui/Layout';
 import { useAgent } from '../../hooks/useAgent';
-import { api } from '../../lib/api-client';
+import { ApiError, api } from '../../lib/api-client';
 
 type AuthoringMode = 'deterministic' | 'legacy';
 type DeterministicSource = 'pine' | 'markdown_yaml';
@@ -14,6 +14,15 @@ type CompileResult = {
   strategyPy: string;
   diagnostics: Array<Record<string, unknown>>;
   roundtrippable: boolean;
+};
+
+type Diagnostic = {
+  code?: string;
+  message?: string;
+  span?: {
+    line?: number | null;
+    column?: number | null;
+  } | null;
 };
 
 export function AgentDetailPage() {
@@ -32,6 +41,7 @@ export function AgentDetailPage() {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
   const [initialized, setInitialized] = useState(false);
 
   const agentData = agent as Record<string, unknown> | undefined;
@@ -96,15 +106,18 @@ export function AgentDetailPage() {
 
     setCompiling(true);
     setError(null);
+    setDiagnostics([]);
     try {
       const compiled = (await api.compileStrategy({ sourceKind, source })) as CompileResult;
       setStrategyIrJson(compiled.strategyIrJson);
       setStrategyPine(compiled.strategyPine);
       setStrategyPy(compiled.strategyPy);
       setPineCopied(false);
+      setDiagnostics(compiled.diagnostics as Diagnostic[]);
       return compiled;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to compile strategy');
+      setDiagnostics(err instanceof ApiError ? (err.diagnostics as Diagnostic[]) : []);
       return null;
     } finally {
       setCompiling(false);
@@ -116,6 +129,7 @@ export function AgentDetailPage() {
     setSaving(true);
     setError(null);
     setSaveMsg(null);
+    setDiagnostics([]);
 
     try {
       if (authoringMode === 'deterministic') {
@@ -152,8 +166,18 @@ export function AgentDetailPage() {
     }
   };
 
-  if (isLoading) return <Layout><div className="text-gray-400">Loading...</div></Layout>;
-  if (!agentData) return <Layout><div className="text-gray-400">Agent not found</div></Layout>;
+  if (isLoading)
+    return (
+      <Layout>
+        <div className="text-gray-400">Loading...</div>
+      </Layout>
+    );
+  if (!agentData)
+    return (
+      <Layout>
+        <div className="text-gray-400">Agent not found</div>
+      </Layout>
+    );
 
   const activeSoul = agentData.activeSoul as Record<string, unknown> | null;
   const deterministicSource = sourceTab === 'pine' ? strategyPine : strategyMd;
@@ -187,6 +211,31 @@ export function AgentDetailPage() {
             {error}
           </div>
         )}
+        {diagnostics.length > 0 && (
+          <div className="rounded-lg border border-amber-700 bg-amber-950/50 p-4 text-sm text-amber-200">
+            <div className="mb-2 font-medium">Compiler Diagnostics</div>
+            <div className="space-y-2">
+              {diagnostics.map((diagnostic, index) => {
+                const line = diagnostic.span?.line;
+                const column = diagnostic.span?.column;
+                const location =
+                  line != null ? `line ${line}${column != null ? `, column ${column}` : ''}` : null;
+                return (
+                  <div
+                    key={`${diagnostic.code || 'diag'}-${index}`}
+                    className="rounded border border-amber-800/60 bg-amber-950/30 p-2"
+                  >
+                    <div className="font-mono text-xs text-amber-300">
+                      {diagnostic.code || 'compile_error'}
+                      {location ? ` • ${location}` : ''}
+                    </div>
+                    <div>{diagnostic.message || 'Unknown compiler error'}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
         {saveMsg && (
           <div className="rounded-lg border border-green-700 bg-green-900/50 p-3 text-sm text-green-300">
             {saveMsg}
@@ -214,10 +263,12 @@ export function AgentDetailPage() {
             <div className="space-y-2">
               <label className="block text-sm font-medium text-gray-300">Authoring Mode</label>
               <div className="flex gap-2">
-                {([
-                  ['deterministic', 'Deterministic'],
-                  ['legacy', 'Legacy Python'],
-                ] as const).map(([value, label]) => (
+                {(
+                  [
+                    ['deterministic', 'Deterministic'],
+                    ['legacy', 'Legacy Python'],
+                  ] as const
+                ).map(([value, label]) => (
                   <button
                     key={value}
                     type="button"
@@ -239,10 +290,12 @@ export function AgentDetailPage() {
                 <div className="space-y-2">
                   <label className="block text-sm font-medium text-gray-300">Source Format</label>
                   <div className="flex gap-2">
-                    {([
-                      ['pine', 'Pine'],
-                      ['markdown_yaml', 'Markdown (YAML)'],
-                    ] as const).map(([value, label]) => (
+                    {(
+                      [
+                        ['pine', 'Pine'],
+                        ['markdown_yaml', 'Markdown (YAML)'],
+                      ] as const
+                    ).map(([value, label]) => (
                       <button
                         key={value}
                         type="button"
@@ -371,7 +424,9 @@ export function AgentDetailPage() {
               </button>
               {hasChanges && <span className="text-xs text-yellow-400">Unsaved changes</span>}
               {strategyIrJson && authoringMode === 'deterministic' && (
-                <span className="text-xs text-gray-400">IR available for deterministic export.</span>
+                <span className="text-xs text-gray-400">
+                  IR available for deterministic export.
+                </span>
               )}
             </div>
           </div>
@@ -425,7 +480,9 @@ export function AgentDetailPage() {
                 ))}
               </div>
             ) : !activeSoul ? (
-              <p className="text-gray-400">No soul versions yet. Run a backtest and generate one.</p>
+              <p className="text-gray-400">
+                No soul versions yet. Run a backtest and generate one.
+              </p>
             ) : null}
           </div>
         )}
@@ -511,7 +568,9 @@ function RunStatusBadge({ status }: { status: string }) {
   };
 
   return (
-    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${colors[status] || colors.pending}`}>
+    <span
+      className={`rounded-full px-2 py-0.5 text-xs font-medium ${colors[status] || colors.pending}`}
+    >
       {status}
     </span>
   );
@@ -526,7 +585,9 @@ function SoulStatusBadge({ status }: { status: string }) {
   };
 
   return (
-    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${colors[status] || colors.pending}`}>
+    <span
+      className={`rounded-full px-2 py-0.5 text-xs font-medium ${colors[status] || colors.pending}`}
+    >
       {status}
     </span>
   );

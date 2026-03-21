@@ -3,8 +3,8 @@ from pathlib import Path
 
 import polars as pl
 
-from aegis_runtime.data.data_catalog import DataCatalog
 from aegis_runtime.data.alpaca_client import AlpacaHistoricalClient
+from aegis_runtime.data.data_catalog import DataCatalog
 
 logger = logging.getLogger(__name__)
 

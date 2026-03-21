@@ -251,6 +251,27 @@ def risk_gate(order, portfolio, market):
     return {"approved": True, "reason": ""}
 `;
 
+const DETERMINISTIC_PINE_SAMPLE = `//@version=5
+strategy("Seeded Deterministic MA Crossover", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=50)
+
+fast_length = input.int(20, "Fast SMA Length")
+slow_length = input.int(50, "Slow SMA Length")
+
+sma_fast = ta.sma(close, fast_length)
+sma_slow = ta.sma(close, slow_length)
+bull_cross = ta.crossover(sma_fast, sma_slow)
+bear_cross = ta.crossunder(sma_fast, sma_slow)
+
+if bull_cross
+    strategy.entry("Long", strategy.long)
+
+if bear_cross
+    strategy.close("Long")
+
+plot(sma_fast, "Fast SMA", color=color.blue, linewidth=2)
+plot(sma_slow, "Slow SMA", color=color.orange, linewidth=2)
+`;
+
 async function seed() {
   const url = process.env.DATABASE_URL;
   if (!url) {
@@ -350,12 +371,33 @@ async function seed() {
     configJson: {},
   });
 
+  const [deterministicAgent] = await db
+    .insert(agents)
+    .values({
+      projectId: project.id,
+      name: 'Deterministic MA Crossover',
+      status: 'idle',
+    })
+    .returning();
+
+  await db.insert(strategyVersions).values({
+    agentId: deterministicAgent.id,
+    version: 1,
+    sourceKind: 'pine',
+    strategyMd: null,
+    strategyPine: DETERMINISTIC_PINE_SAMPLE,
+    strategyPy: null,
+    strategyIrJson: null,
+    configJson: {},
+  });
+
   console.log('Seed complete!');
   console.log(`  User: ${user.id}`);
   console.log(`  Project: ${project.id}`);
   console.log(`  Agent (MA Crossover): ${agent.id}`);
   console.log(`  Agent (Mean Reverter): ${meanRevAgent.id}`);
   console.log(`  Agent (Buy & Hold): ${buyHoldAgent.id}`);
+  console.log(`  Agent (Deterministic MA Crossover): ${deterministicAgent.id}`);
 
   await client.end();
 }

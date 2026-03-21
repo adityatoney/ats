@@ -9,6 +9,7 @@
     "lint": "turbo lint",
     "lint:py": "cd packages/runtime && uv run ruff check src/ tests/",
     "format:py": "cd packages/runtime && uv run ruff format src/ tests/",
+    "strategy:sweep": "python scripts/sweep_pinescript_strategies.py",
     "test": "turbo test",
     "test:py": "cd packages/runtime && uv run pytest tests/ -v",
     "docker:up": "docker compose up -d",

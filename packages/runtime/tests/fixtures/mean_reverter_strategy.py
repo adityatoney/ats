@@ -1,5 +1,4 @@
 """RSI-based mean reversion strategy for tournament testing."""
-import polars as pl
 
 
 def prepare_features(df):

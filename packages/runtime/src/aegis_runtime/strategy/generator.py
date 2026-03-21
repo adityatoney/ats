@@ -1,7 +1,7 @@
 import logging
 import re
 
-from aegis_runtime.strategy.validator import StrategyValidator, StrategyValidationError
+from aegis_runtime.strategy.validator import StrategyValidationError, StrategyValidator
 
 logger = logging.getLogger(__name__)
 

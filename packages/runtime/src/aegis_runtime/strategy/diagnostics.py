@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel
@@ -50,6 +51,34 @@ def compile_error(code: str, message: str, node=None) -> StrategyCompileError:
                 code=code,
                 message=message,
                 span=span_from_node(node),
+            )
+        ],
+    )
+
+
+_PARSE_LINE_RE = re.compile(r"line (?P<line>\d+)")
+
+
+def parse_error(message: str) -> StrategyCompileError:
+    lines = message.splitlines()
+    span = None
+    match = _PARSE_LINE_RE.search(message)
+    if match:
+        line = int(match.group("line"))
+        column = None
+        for index, value in enumerate(lines):
+            if value.strip() == "^" and index > 0:
+                column = max(value.find("^"), 0)
+                break
+        span = SourceSpan(line=line, column=column)
+
+    return StrategyCompileError(
+        f"Failed to parse Pine source: {message}",
+        diagnostics=[
+            StrategyDiagnostic(
+                code="parse_error",
+                message=f"Failed to parse Pine source: {message}",
+                span=span,
             )
         ],
     )

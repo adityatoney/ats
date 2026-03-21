@@ -3,11 +3,16 @@ from __future__ import annotations
 import re
 from collections import OrderedDict
 
-from aegis_runtime.strategy.diagnostics import StrategyCompileError, compile_error
+from aegis_runtime.strategy.diagnostics import (
+    StrategyCompileError,
+    compile_error,
+    parse_error,
+)
 from aegis_runtime.strategy.ir import (
     IRCallArg,
     IRExpression,
     StrategyCalculation,
+    StrategyFunction,
     StrategyInput,
     StrategyIR,
     StrategyMeta,
@@ -21,16 +26,35 @@ _SUPPORTED_EXPR_CALLS = {
     "ta.ema",
     "ta.rsi",
     "ta.rma",
+    "ta.atr",
+    "ta.tr",
     "ta.change",
     "ta.dmi",
     "ta.macd",
     "ta.stdev",
+    "ta.sum",
+    "ta.highest",
+    "ta.lowest",
     "ta.highestbars",
     "ta.lowestbars",
+    "ta.pivotlow",
+    "ta.pivothigh",
+    "ta.valuewhen",
+    "ta.barssince",
+    "ta.stoch",
+    "ta.supertrend",
+    "ta.linreg",
+    "request.security",
     "ta.crossover",
     "ta.crossunder",
+    "ta.cross",
+    "avg",
+    "timestamp",
+    "math.abs",
+    "math.round",
     "math.max",
     "math.min",
+    "na",
     "nz",
     "color.new",
 }
@@ -43,15 +67,29 @@ _CALL_ALIASES = {
     "ema": "ta.ema",
     "rsi": "ta.rsi",
     "rma": "ta.rma",
+    "atr": "ta.atr",
+    "tr": "ta.tr",
     "change": "ta.change",
     "dmi": "ta.dmi",
     "macd": "ta.macd",
     "stdev": "ta.stdev",
+    "sum": "ta.sum",
+    "highest": "ta.highest",
+    "lowest": "ta.lowest",
     "highestbars": "ta.highestbars",
     "lowestbars": "ta.lowestbars",
+    "pivotlow": "ta.pivotlow",
+    "pivothigh": "ta.pivothigh",
+    "valuewhen": "ta.valuewhen",
+    "barssince": "ta.barssince",
+    "stoch": "ta.stoch",
+    "supertrend": "ta.supertrend",
     "security": "request.security",
     "crossover": "ta.crossover",
     "crossunder": "ta.crossunder",
+    "cross": "ta.cross",
+    "abs": "math.abs",
+    "round": "math.round",
     "max": "math.max",
     "min": "math.min",
 }
@@ -65,6 +103,7 @@ _INPUT_TYPE_ALIASES = {
     "input.time": "time",
     "input.timeframe": "timeframe",
     "input.resolution": "timeframe",
+    "input.color": "color",
 }
 _COMPARISON_MAP = {
     "Eq": "==",
@@ -137,7 +176,7 @@ def parse_pine_source(source: str) -> StrategyIR:
     try:
         module = parse(source)
     except Exception as exc:
-        raise StrategyCompileError(f"Failed to parse Pine source: {exc}") from exc
+        raise parse_error(str(exc)) from exc
 
     compiler = _PineLowerer(source=source, api=api)
     return compiler.lower(module)
@@ -168,6 +207,7 @@ class _PineLowerer:
         self.version = self._extract_version(source)
         self.meta: StrategyMeta | None = None
         self.inputs: list[StrategyInput] = []
+        self.functions: list[StrategyFunction] = []
         self.calculations: list[StrategyCalculation] = []
         self.orders: list[StrategyOrderAction] = []
         self.plots: list[StrategyPlot] = []
@@ -189,7 +229,8 @@ class _PineLowerer:
         }
         for order in self.orders:
             if order.kind in {"close", "exit"} and order.side is None:
-                order.side = entry_order_sides.get(order.orderId)
+                lookup_id = order.fromEntryId or order.orderId
+                order.side = entry_order_sides.get(lookup_id)
 
         directions = {order.side for order in self.orders if order.side}
         if directions == {"long"}:
@@ -209,6 +250,7 @@ class _PineLowerer:
         return StrategyIR(
             meta=self.meta,
             inputs=self.inputs,
+            functions=self.functions,
             indicators=self.calculations,
             signals={
                 "entry": entry_signals,
@@ -240,6 +282,10 @@ class _PineLowerer:
                     kind="reassign",
                 )
             )
+            return
+
+        if type(statement).__name__ == "FunctionDef":
+            self._lower_function_def(statement)
             return
 
         raise compile_error(
@@ -275,7 +321,10 @@ class _PineLowerer:
             if self._is_passthrough_if(expr):
                 self.passthrough.append(self.unparse(statement).strip())
                 return
-            self._lower_conditional_orders(expr)
+            if self._if_contains_only_order_calls(expr):
+                self._lower_conditional_orders(expr)
+            else:
+                self._lower_conditional_assignments(expr)
             return
 
         raise compile_error(
@@ -352,6 +401,19 @@ class _PineLowerer:
         return call_path == "input" or call_path.startswith("input.")
 
     def _hoist_embedded_inputs(self, node, assignment_name: str) -> None:
+        self._hoist_embedded_inputs_inner(node, assignment_name, set())
+
+    def _hoist_embedded_inputs_inner(
+        self,
+        node,
+        assignment_name: str,
+        visited: set[int],
+    ) -> None:
+        node_id = id(node)
+        if node_id in visited:
+            return
+        visited.add(node_id)
+
         if type(node).__name__ == "Call":
             call_path = self._normalize_call_path(self._call_path(node.func))
             if self._is_supported_input_call(call_path):
@@ -364,9 +426,61 @@ class _PineLowerer:
             if isinstance(value, list):
                 for item in value:
                     if hasattr(item, "__dict__"):
-                        self._hoist_embedded_inputs(item, assignment_name)
+                        self._hoist_embedded_inputs_inner(item, assignment_name, visited)
             elif hasattr(value, "__dict__"):
-                self._hoist_embedded_inputs(value, assignment_name)
+                self._hoist_embedded_inputs_inner(value, assignment_name, visited)
+
+    def _lower_function_def(self, statement) -> None:
+        params = [param.name for param in getattr(statement, "args", [])]
+        body = self._lower_function_body(getattr(statement, "body", []), statement)
+        self.functions.append(
+            StrategyFunction(
+                name=statement.name,
+                params=params,
+                body=body,
+            )
+        )
+
+    def _lower_function_body(self, body, error_node) -> IRExpression:
+        if len(body) != 1:
+            raise compile_error(
+                "unsupported_function_body",
+                "Only single-expression Pine function bodies are supported",
+                error_node,
+            )
+        expression_stmt = body[0]
+        if type(expression_stmt).__name__ != "Expr":
+            raise compile_error(
+                "unsupported_function_body",
+                "Only expression-based Pine function bodies are supported",
+                error_node,
+            )
+        value = expression_stmt.value
+        if type(value).__name__ == "If":
+            return self._lower_function_if(value)
+        return self.lower_expression(value)
+
+    def _lower_function_if(self, if_node) -> IRExpression:
+        if len(if_node.body) != 1 or len(getattr(if_node, "orelse", []) or []) != 1:
+            raise compile_error(
+                "unsupported_function_if",
+                "Pine function if/else bodies must have exactly one expression per branch",
+                if_node,
+            )
+        true_branch = if_node.body[0]
+        false_branch = if_node.orelse[0]
+        if type(true_branch).__name__ != "Expr" or type(false_branch).__name__ != "Expr":
+            raise compile_error(
+                "unsupported_function_if",
+                "Pine function if/else branches must be expression statements",
+                if_node,
+            )
+        return IRExpression(
+            kind="ternary",
+            test=self.lower_expression(if_node.test),
+            body=self.lower_expression(true_branch.value),
+            orelse=self.lower_expression(false_branch.value),
+        )
 
     def _next_synthetic_input_name(self, assignment_name: str) -> str:
         suffix = len(
@@ -383,15 +497,16 @@ class _PineLowerer:
 
     def _lower_strategy_call(self, call) -> StrategyMeta:
         args = list(getattr(call, "args", []))
-        if not args:
+        positional_args = [arg for arg in args if arg.name is None]
+        named_args = OrderedDict((arg.name, arg.value) for arg in args if arg.name)
+        if not positional_args and "title" not in named_args:
             raise compile_error("missing_strategy_name", "strategy() name is required", call)
 
-        title_arg = args[0]
-        title = self._literal_value(title_arg.value, call)
+        title_node = positional_args[0].value if positional_args else named_args.pop("title")
+        title = self._literal_value(title_node, call)
         if not isinstance(title, str):
             raise compile_error("invalid_strategy_name", "strategy() title must be a string", call)
 
-        named_args = {arg.name: arg.value for arg in args[1:] if arg.name}
         overlay = bool(self._optional_literal(named_args.pop("overlay", None), False))
         initial_capital = float(
             self._optional_literal(named_args.pop("initial_capital", None), 100000.0)
@@ -496,6 +611,12 @@ class _PineLowerer:
                 type_node,
             )
 
+        for positional_arg in positional_args[1:]:
+            type_path = self._expression_path(positional_arg.value)
+            resolved = _INPUT_TYPE_ALIASES.get(type_path)
+            if resolved:
+                return resolved
+
         defval_node = named_args.get("defval")
         if defval_node is None and positional_args:
             defval_node = positional_args[0].value
@@ -547,7 +668,7 @@ class _PineLowerer:
         expression = self.lower_expression(node)
         if input_type == "source":
             return self._expression_path(node), expression
-        if input_type in {"time", "timeframe"}:
+        if input_type in {"time", "timeframe", "color"}:
             return render_expression(expression), expression
         raise compile_error("expected_literal", "Expected a literal value", error_node)
 
@@ -573,10 +694,14 @@ class _PineLowerer:
                 op="not",
                 operand=self.lower_expression(if_node.test),
             )
-            else_when = negated if inherited_when is None else IRExpression(
-                kind="bool",
-                op="and",
-                values=[inherited_when, negated],
+            else_when = (
+                negated
+                if inherited_when is None
+                else IRExpression(
+                    kind="bool",
+                    op="and",
+                    values=[inherited_when, negated],
+                )
             )
             for child in if_node.orelse:
                 self._lower_conditional_child(child, else_when)
@@ -602,6 +727,100 @@ class _PineLowerer:
             "Only strategy.entry/close/exit calls are supported inside executable Pine if blocks",
             child,
         )
+
+    def _if_contains_only_order_calls(self, if_node) -> bool:
+        for child in if_node.body:
+            if not self._is_supported_order_child(child):
+                return False
+        for child in getattr(if_node, "orelse", []) or []:
+            if not self._is_supported_order_child(child):
+                return False
+        return True
+
+    def _is_supported_order_child(self, child) -> bool:
+        Expr = self.api["Expr"]
+        Call = self.api["Call"]
+        if isinstance(child, Expr):
+            if type(child.value).__name__ == "If":
+                return self._if_contains_only_order_calls(child.value)
+            return (
+                isinstance(child.value, Call)
+                and self._normalize_call_path(self._call_path(child.value.func))
+                in _SUPPORTED_STRATEGY_CALLS
+            )
+        return False
+
+    def _lower_conditional_assignments(
+        self,
+        if_node,
+        inherited_when: IRExpression | None = None,
+    ) -> None:
+        condition = self.lower_expression(if_node.test)
+        active_when = self._combine_conditions(inherited_when, condition)
+
+        for child in if_node.body:
+            self._lower_conditional_assignment_child(child, active_when)
+
+        if getattr(if_node, "orelse", None):
+            negated = IRExpression(
+                kind="unary",
+                op="not",
+                operand=self.lower_expression(if_node.test),
+            )
+            else_when = self._combine_conditions(inherited_when, negated)
+            for child in if_node.orelse:
+                self._lower_conditional_assignment_child(child, else_when)
+
+    def _lower_conditional_assignment_child(self, child, when: IRExpression) -> None:
+        ReAssign = self.api["ReAssign"]
+        Assign = self.api["Assign"]
+        Expr = self.api["Expr"]
+
+        if isinstance(child, ReAssign):
+            name = self._require_name(child.target, child)
+            self.calculations.append(
+                StrategyCalculation(
+                    name=name,
+                    kind="reassign",
+                    expression=IRExpression(
+                        kind="ternary",
+                        test=when,
+                        body=self.lower_expression(child.value),
+                        orelse=IRExpression(kind="name", name=name),
+                    ),
+                )
+            )
+            return
+
+        if isinstance(child, Assign):
+            name = self._require_name(child.target, child)
+            fallback = (
+                IRExpression(kind="name", name=name)
+                if self._has_known_binding(name)
+                else IRExpression(kind="constant", value=None)
+            )
+            self.calculations.append(
+                StrategyCalculation(
+                    name=name,
+                    kind="assign",
+                    expression=IRExpression(
+                        kind="ternary",
+                        test=when,
+                        body=self.lower_expression(child.value),
+                        orelse=fallback,
+                    ),
+                )
+            )
+            return
+
+        if isinstance(child, Expr) and type(child.value).__name__ == "If":
+            self._lower_conditional_assignments(child.value, when)
+            return
+
+        self.passthrough.append(self.unparse(child).strip())
+
+    def _has_known_binding(self, name: str) -> bool:
+        return any(item.name == name for item in self.calculations)
 
     def _append_order(self, call, when: IRExpression) -> None:
         call_path = self._normalize_call_path(self._call_path(call.func))
@@ -643,6 +862,8 @@ class _PineLowerer:
                         order_when,
                         self.lower_expression(arg.value),
                     )
+                elif arg.name in {"comment", "alert_message"}:
+                    continue
                 elif arg.name is not None:
                     raise compile_error(
                         "unsupported_strategy_entry_arg",
@@ -669,7 +890,7 @@ class _PineLowerer:
                         order_when,
                         self.lower_expression(arg.value),
                     )
-                elif arg.name == "comment":
+                elif arg.name in {"comment", "alert_message"}:
                     continue
                 elif arg.name is not None:
                     raise compile_error(
@@ -689,8 +910,15 @@ class _PineLowerer:
         if call_path == "strategy.exit":
             quantity = None
             quantity_type = None
+            from_entry_id = None
+            stop = None
+            limit = None
+            profit = None
+            loss = None
             for arg in args[1:]:
-                if arg.name == "qty":
+                if arg.name is None and from_entry_id is None:
+                    from_entry_id = self._literal_value(arg.value, call)
+                elif arg.name == "qty":
                     quantity = self.lower_expression(arg.value)
                     quantity_type = "qty"
                 elif arg.name == "when":
@@ -698,7 +926,17 @@ class _PineLowerer:
                         order_when,
                         self.lower_expression(arg.value),
                     )
-                elif arg.name in {"comment", "from_entry"}:
+                elif arg.name == "stop":
+                    stop = self.lower_expression(arg.value)
+                elif arg.name == "limit":
+                    limit = self.lower_expression(arg.value)
+                elif arg.name == "profit":
+                    profit = self.lower_expression(arg.value)
+                elif arg.name == "loss":
+                    loss = self.lower_expression(arg.value)
+                elif arg.name == "from_entry":
+                    from_entry_id = self._literal_value(arg.value, call)
+                elif arg.name in {"comment", "alert_message"}:
                     continue
                 elif arg.name is not None:
                     raise compile_error(
@@ -711,8 +949,13 @@ class _PineLowerer:
                     kind="exit",
                     orderId=order_id,
                     when=order_when,
+                    fromEntryId=from_entry_id,
                     quantity=quantity,
                     quantityType=quantity_type,
+                    stop=stop,
+                    limit=limit,
+                    profit=profit,
+                    loss=loss,
                 )
             )
             return
@@ -759,7 +1002,7 @@ class _PineLowerer:
                     name=self._active_input_replacements[id(node)],
                 )
             call_path = self._normalize_call_path(self._call_path(node.func))
-            if call_path.startswith("request."):
+            if call_path.startswith("request.") and call_path != "request.security":
                 raise compile_error(
                     "unsupported_request_security",
                     "request.* functions are not supported in the deterministic compiler",
@@ -769,6 +1012,7 @@ class _PineLowerer:
                 call_path not in _SUPPORTED_EXPR_CALLS
                 and call_path not in _SUPPORTED_PLOT_CALLS
                 and call_path not in _PASSTHROUGH_CALLS
+                and call_path not in {function.name for function in self.functions}
             ):
                 raise compile_error(
                     "unsupported_call",
@@ -972,6 +1216,11 @@ def render_strategy_ir_to_pine(strategy_ir: StrategyIR) -> str:
         for input_def in strategy_ir.inputs:
             lines.append(_render_input(input_def))
 
+    if strategy_ir.functions:
+        lines.append("")
+        for function in strategy_ir.functions:
+            lines.append(_render_function(function))
+
     if strategy_ir.indicators:
         lines.append("")
         for calculation in strategy_ir.indicators:
@@ -1074,6 +1323,11 @@ def _render_input(input_def: StrategyInput) -> str:
     return f"{input_def.name} = input.{input_def.type}({', '.join(args)})"
 
 
+def _render_function(function: StrategyFunction) -> str:
+    params = ", ".join(function.params)
+    return f"{function.name}({params}) => {render_expression(function.body)}"
+
+
 def _render_calculation(calculation: StrategyCalculation) -> str:
     expression = render_expression(calculation.expression)
     if calculation.kind == "persistent_assign":
@@ -1108,8 +1362,18 @@ def _render_order_call(order: StrategyOrderAction) -> str:
         return f"strategy.close({_render_constant(order.orderId)})"
 
     args = [_render_constant(order.orderId)]
+    if order.fromEntryId:
+        args.append(_render_constant(order.fromEntryId))
     if order.quantity is not None and order.quantityType is not None:
         args.append(f"{order.quantityType}={render_expression(order.quantity)}")
+    if order.stop is not None:
+        args.append(f"stop={render_expression(order.stop)}")
+    if order.limit is not None:
+        args.append(f"limit={render_expression(order.limit)}")
+    if order.profit is not None:
+        args.append(f"profit={render_expression(order.profit)}")
+    if order.loss is not None:
+        args.append(f"loss={render_expression(order.loss)}")
     return f"strategy.exit({', '.join(args)})"
 
 

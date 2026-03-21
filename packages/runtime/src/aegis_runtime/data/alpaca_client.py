@@ -1,15 +1,13 @@
-import os
 import logging
+import os
 import time
 from datetime import datetime
 
 import polars as pl
-from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.enums import Adjustment
+from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-
-from aegis_runtime.data.schemas import BAR_COLUMNS
 
 logger = logging.getLogger(__name__)
 

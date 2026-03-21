@@ -1,12 +1,11 @@
 import logging
-import os
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from aegis_runtime.strategy.diagnostics import StrategyCompileError
-from aegis_runtime.strategy.generator import StrategyGenerator
+from aegis_runtime.strategy.loader import StrategyLoader
 from aegis_runtime.strategy.markdown_compiler import compile_markdown_source
 from aegis_runtime.strategy.pine_compiler import (
     parse_pine_source,
@@ -14,15 +13,10 @@ from aegis_runtime.strategy.pine_compiler import (
 )
 from aegis_runtime.strategy.python_renderer import render_python_from_ir
 from aegis_runtime.strategy.reverse_renderer import render_pine_from_generated_python
-from aegis_runtime.strategy.loader import StrategyLoader
 from aegis_runtime.strategy.validator import StrategyValidator
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-class GenerateStrategyRequest(BaseModel):
-    strategyMd: str
 
 
 class CompileStrategyRequest(BaseModel):
@@ -36,33 +30,6 @@ class ReverseStrategyRequest(BaseModel):
 
 class ValidatePythonRequest(BaseModel):
     strategyPy: str
-
-
-@router.post("/generate")
-async def generate_strategy(request: GenerateStrategyRequest):
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return {
-            "error": "ANTHROPIC_API_KEY not configured",
-            "strategyPy": "",
-            "pineScript": "",
-            "valid": False,
-            "errors": ["Missing API key"],
-        }
-
-    generator = StrategyGenerator(api_key)
-    try:
-        result = await generator.generate(request.strategyMd)
-        return result
-    except Exception as e:
-        logger.exception("Strategy generation failed")
-        return {
-            "error": str(e),
-            "strategyPy": "",
-            "pineScript": "",
-            "valid": False,
-            "errors": [str(e)],
-        }
 
 
 @router.post("/compile")

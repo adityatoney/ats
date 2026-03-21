@@ -6,8 +6,8 @@ from aegis_runtime.api.routes.health import router as health_router
 from aegis_runtime.api.routes.runs import router as runs_router
 from aegis_runtime.api.routes.soul import router as soul_router
 from aegis_runtime.api.routes.strategy import router as strategy_router
-from aegis_runtime.api.routes.tournaments import router as tournaments_router
 from aegis_runtime.api.routes.tournaments import data_router
+from aegis_runtime.api.routes.tournaments import router as tournaments_router
 
 app = FastAPI(title="Aegis Runtime", version="0.1.0")
 

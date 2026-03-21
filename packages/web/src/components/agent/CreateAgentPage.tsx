@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../ui/Layout';
-import { api } from '../../lib/api-client';
+import { ApiError, api } from '../../lib/api-client';
 
 const PINE_TEMPLATE = `//@version=5
 strategy("MA Crossover - Deterministic", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=50)
@@ -118,6 +118,15 @@ type CompileResult = {
   roundtrippable: boolean;
 };
 
+type Diagnostic = {
+  code?: string;
+  message?: string;
+  span?: {
+    line?: number | null;
+    column?: number | null;
+  } | null;
+};
+
 export function CreateAgentPage() {
   const navigate = useNavigate();
   const [name, setName] = useState('');
@@ -132,6 +141,7 @@ export function CreateAgentPage() {
   const [compiling, setCompiling] = useState(false);
   const [pineCopied, setPineCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
 
   const { data: agents } = useQuery({
     queryKey: ['agents'],
@@ -147,15 +157,18 @@ export function CreateAgentPage() {
 
     setCompiling(true);
     setError(null);
+    setDiagnostics([]);
     try {
       const compiled = (await api.compileStrategy({ sourceKind, source })) as CompileResult;
       setStrategyIrJson(compiled.strategyIrJson);
       setStrategyPine(compiled.strategyPine);
       setStrategyPy(compiled.strategyPy);
       setPineCopied(false);
+      setDiagnostics(compiled.diagnostics as Diagnostic[]);
       return compiled;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to compile strategy');
+      setDiagnostics(err instanceof ApiError ? (err.diagnostics as Diagnostic[]) : []);
       return null;
     } finally {
       setCompiling(false);
@@ -168,6 +181,7 @@ export function CreateAgentPage() {
 
     setLoading(true);
     setError(null);
+    setDiagnostics([]);
 
     try {
       const agent = (await api.createAgent(projectId, { name: name.trim() })) as Record<
@@ -215,14 +229,39 @@ export function CreateAgentPage() {
         <div>
           <h1 className="text-2xl font-bold">Create Agent</h1>
           <p className="mt-1 text-sm text-gray-400">
-            Deterministic mode compiles Pine or strict Markdown YAML into canonical IR and
-            generated Python. Legacy Python remains available for manual strategies.
+            Deterministic mode compiles Pine or strict Markdown YAML into canonical IR and generated
+            Python. Legacy Python remains available for manual strategies.
           </p>
         </div>
 
         {error && (
           <div className="rounded-lg border border-red-700 bg-red-900/50 p-3 text-sm text-red-300">
             {error}
+          </div>
+        )}
+        {diagnostics.length > 0 && (
+          <div className="rounded-lg border border-amber-700 bg-amber-950/50 p-4 text-sm text-amber-200">
+            <div className="mb-2 font-medium">Compiler Diagnostics</div>
+            <div className="space-y-2">
+              {diagnostics.map((diagnostic, index) => {
+                const line = diagnostic.span?.line;
+                const column = diagnostic.span?.column;
+                const location =
+                  line != null ? `line ${line}${column != null ? `, column ${column}` : ''}` : null;
+                return (
+                  <div
+                    key={`${diagnostic.code || 'diag'}-${index}`}
+                    className="rounded border border-amber-800/60 bg-amber-950/30 p-2"
+                  >
+                    <div className="font-mono text-xs text-amber-300">
+                      {diagnostic.code || 'compile_error'}
+                      {location ? ` • ${location}` : ''}
+                    </div>
+                    <div>{diagnostic.message || 'Unknown compiler error'}</div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
@@ -249,10 +288,12 @@ export function CreateAgentPage() {
             <div className="space-y-2">
               <label className="block text-sm font-medium text-gray-300">Authoring Mode</label>
               <div className="flex gap-2">
-                {([
-                  ['deterministic', 'Deterministic'],
-                  ['legacy', 'Legacy Python'],
-                ] as const).map(([value, label]) => (
+                {(
+                  [
+                    ['deterministic', 'Deterministic'],
+                    ['legacy', 'Legacy Python'],
+                  ] as const
+                ).map(([value, label]) => (
                   <button
                     key={value}
                     type="button"
@@ -274,10 +315,12 @@ export function CreateAgentPage() {
                 <div className="space-y-2">
                   <label className="block text-sm font-medium text-gray-300">Source Format</label>
                   <div className="flex gap-2">
-                    {([
-                      ['pine', 'Pine'],
-                      ['markdown_yaml', 'Markdown (YAML)'],
-                    ] as const).map(([value, label]) => (
+                    {(
+                      [
+                        ['pine', 'Pine'],
+                        ['markdown_yaml', 'Markdown (YAML)'],
+                      ] as const
+                    ).map(([value, label]) => (
                       <button
                         key={value}
                         type="button"
@@ -326,7 +369,8 @@ export function CreateAgentPage() {
                     {compiling ? 'Compiling...' : 'Compile Strategy'}
                   </button>
                   <span className="text-xs text-gray-400">
-                    Server-owned compile: source -&gt; IR -&gt; normalized Pine -&gt; generated Python.
+                    Server-owned compile: source -&gt; IR -&gt; normalized Pine -&gt; generated
+                    Python.
                   </span>
                 </div>
 

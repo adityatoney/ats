@@ -3,8 +3,11 @@ import { eq, desc } from 'drizzle-orm';
 import { db } from '../lib/db';
 import { agents, strategyVersions, soulVersions, runs } from '@aegis/db/schema';
 import { agentIsolation } from '../middleware/agent-isolation';
-import { pythonClient } from '../lib/python-client';
-import { compileDeterministicArtifacts } from '../services/strategy-artifacts';
+import { PythonRuntimeError, pythonClient } from '../lib/python-client';
+import {
+  compileDeterministicArtifacts,
+  ensureDeterministicArtifacts,
+} from '../services/strategy-artifacts';
 
 export const agentRoutes = new Hono();
 
@@ -22,10 +25,13 @@ agentRoutes.get('/:id', agentIsolation('agent'), async (c) => {
   });
   if (!agent) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
 
-  const latestStrategy = await db.query.strategyVersions.findFirst({
+  const rawLatestStrategy = await db.query.strategyVersions.findFirst({
     where: eq(strategyVersions.agentId, id),
     orderBy: [desc(strategyVersions.version)],
   });
+  const latestStrategy = rawLatestStrategy
+    ? await ensureDeterministicArtifacts(rawLatestStrategy)
+    : null;
 
   const activeSoul = await db.query.soulVersions.findFirst({
     where: eq(soulVersions.agentId, id),
@@ -50,22 +56,6 @@ agentRoutes.get('/:id/runs', agentIsolation('agent'), async (c) => {
   return c.json({ data: agentRuns });
 });
 
-agentRoutes.post('/generate-strategy', async (c) => {
-  const body = await c.req.json();
-  const strategyMd = body.strategyMd as string;
-  if (!strategyMd?.trim()) {
-    return c.json({ error: { message: 'strategyMd is required', code: 'BAD_REQUEST' } }, 400);
-  }
-
-  try {
-    const result = await pythonClient.generateStrategy({ strategyMd });
-    return c.json({ data: result });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Strategy generation failed';
-    return c.json({ error: { message, code: 'GENERATION_FAILED' } }, 500);
-  }
-});
-
 agentRoutes.post('/compile-strategy', async (c) => {
   const body = await c.req.json();
   const sourceKind = body.sourceKind as 'pine' | 'markdown_yaml' | undefined;
@@ -86,8 +76,10 @@ agentRoutes.post('/compile-strategy', async (c) => {
     const result = await compileDeterministicArtifacts(sourceKind, source);
     return c.json({ data: result });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Deterministic strategy compilation failed';
-    return c.json({ error: { message, code: 'COMPILE_FAILED' } }, 400);
+    const message =
+      err instanceof Error ? err.message : 'Deterministic strategy compilation failed';
+    const diagnostics = err instanceof PythonRuntimeError ? err.diagnostics : [];
+    return c.json({ error: { message, code: 'COMPILE_FAILED', diagnostics } }, 400);
   }
 });
 
@@ -141,7 +133,8 @@ agentRoutes.put('/:id/strategy', async (c) => {
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to compile Pine strategy';
-      return c.json({ error: { message, code: 'COMPILE_FAILED' } }, 400);
+      const diagnostics = err instanceof PythonRuntimeError ? err.diagnostics : [];
+      return c.json({ error: { message, code: 'COMPILE_FAILED', diagnostics } }, 400);
     }
   } else if (sourceKind === 'markdown_yaml') {
     const strategyMd = body.strategyMd as string | undefined;
@@ -171,7 +164,8 @@ agentRoutes.put('/:id/strategy', async (c) => {
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to compile markdown strategy';
-      return c.json({ error: { message, code: 'COMPILE_FAILED' } }, 400);
+      const diagnostics = err instanceof PythonRuntimeError ? err.diagnostics : [];
+      return c.json({ error: { message, code: 'COMPILE_FAILED', diagnostics } }, 400);
     }
   } else {
     const strategyPy = body.strategyPy as string | undefined;
@@ -199,17 +193,14 @@ agentRoutes.put('/:id/strategy', async (c) => {
       version: nextVersion,
       sourceKind,
       strategyMd: body.strategyMd || null,
-      strategyPine: body.strategyPine || null,
+      strategyPine: null,
       strategyPy,
-      strategyIrJson: body.strategyIrJson || null,
+      strategyIrJson: null,
       configJson,
     };
   }
 
-  const [sv] = await db
-    .insert(strategyVersions)
-    .values(insertValues)
-    .returning();
+  const [sv] = await db.insert(strategyVersions).values(insertValues).returning();
 
   return c.json({ data: sv }, 201);
 });

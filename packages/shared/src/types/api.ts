@@ -8,6 +8,17 @@ export interface ApiError {
   error: {
     message: string;
     code: string;
+    diagnostics?: Array<{
+      code?: string;
+      message?: string;
+      severity?: 'error' | 'warning';
+      span?: {
+        line?: number | null;
+        column?: number | null;
+        endLine?: number | null;
+        endColumn?: number | null;
+      } | null;
+    }>;
   };
 }
 

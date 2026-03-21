@@ -1,5 +1,4 @@
 """Buy day 1, hold forever strategy for tournament testing."""
-import polars as pl
 
 
 def prepare_features(df):

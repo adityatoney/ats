@@ -70,7 +70,7 @@ class StrategyMeta(BaseModel):
 
 class StrategyInput(BaseModel):
     name: str
-    type: Literal["int", "float", "string", "bool", "source", "time", "timeframe"]
+    type: Literal["int", "float", "string", "bool", "source", "time", "timeframe", "color"]
     default: Any
     defaultExpression: IRExpression | None = None
     title: str | None = None
@@ -84,6 +84,12 @@ class StrategyCalculation(BaseModel):
     typeHint: str | None = None
 
 
+class StrategyFunction(BaseModel):
+    name: str
+    params: list[str] = Field(default_factory=list)
+    body: IRExpression
+
+
 class StrategySignals(BaseModel):
     entry: list[IRExpression] = Field(default_factory=list)
     exit: list[IRExpression] = Field(default_factory=list)
@@ -94,8 +100,13 @@ class StrategyOrderAction(BaseModel):
     orderId: str
     when: IRExpression
     side: Literal["long", "short"] | None = None
+    fromEntryId: str | None = None
     quantity: IRExpression | None = None
     quantityType: Literal["qty", "qty_percent", "cash"] | None = None
+    stop: IRExpression | None = None
+    limit: IRExpression | None = None
+    profit: IRExpression | None = None
+    loss: IRExpression | None = None
 
 
 class StrategyRisk(BaseModel):
@@ -116,6 +127,7 @@ class StrategyPlot(BaseModel):
 class StrategyIR(BaseModel):
     meta: StrategyMeta
     inputs: list[StrategyInput] = Field(default_factory=list)
+    functions: list[StrategyFunction] = Field(default_factory=list)
     indicators: list[StrategyCalculation] = Field(default_factory=list)
     signals: StrategySignals = Field(default_factory=StrategySignals)
     orders: list[StrategyOrderAction] = Field(default_factory=list)

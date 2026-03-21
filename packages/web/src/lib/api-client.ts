@@ -1,5 +1,24 @@
 const BASE_URL = '/api';
 
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  diagnostics: Array<Record<string, unknown>>;
+
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    diagnostics: Array<Record<string, unknown>> = [],
+  ) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.diagnostics = diagnostics;
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,
@@ -11,7 +30,31 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`API error ${res.status}: ${body}`);
+    let parsedError:
+      | {
+          message?: string;
+          code?: string;
+          diagnostics?: Array<Record<string, unknown>>;
+        }
+      | undefined;
+    try {
+      const json = JSON.parse(body) as {
+        error?: {
+          message?: string;
+          code?: string;
+          diagnostics?: Array<Record<string, unknown>>;
+        };
+      };
+      parsedError = json.error;
+    } catch {
+      parsedError = undefined;
+    }
+    throw new ApiError(
+      parsedError?.message || `API error ${res.status}: ${body}`,
+      res.status,
+      parsedError?.code,
+      parsedError?.diagnostics || [],
+    );
   }
 
   const json = await res.json();
@@ -51,11 +94,6 @@ export const api = {
     }>(`/agents/compile-strategy`, {
       method: 'POST',
       body: JSON.stringify(data),
-    }),
-  generateStrategy: (strategyMd: string) =>
-    request<{ strategyPy: string; pineScript: string; valid: boolean; errors: string[] }>(`/agents/generate-strategy`, {
-      method: 'POST',
-      body: JSON.stringify({ strategyMd }),
     }),
 
   // Runs
@@ -97,8 +135,7 @@ export const api = {
   getSoulVersions: (agentId: string) => request(`/souls/agent/${agentId}/versions`),
   approveSoul: (agentId: string, versionId: string) =>
     request(`/souls/agent/${agentId}/${versionId}/approve`, { method: 'POST' }),
-  generateSoul: (runId: string) =>
-    request(`/runs/${runId}/generate-soul`, { method: 'POST' }),
+  generateSoul: (runId: string) => request(`/runs/${runId}/generate-soul`, { method: 'POST' }),
 
   // Tournaments
   listTournaments: (projectId?: string) =>
@@ -110,12 +147,8 @@ export const api = {
     config: Record<string, unknown>;
   }) => request('/tournaments', { method: 'POST', body: JSON.stringify(data) }),
   getTournament: (id: string) => request(`/tournaments/${id}`),
-  startTournament: (id: string) =>
-    request(`/tournaments/${id}/start`, { method: 'POST' }),
-  cancelTournament: (id: string) =>
-    request(`/tournaments/${id}/cancel`, { method: 'POST' }),
-  getTournamentLeaderboard: (id: string) =>
-    request(`/tournaments/${id}/leaderboard`),
-  getTournamentComparison: (id: string) =>
-    request(`/tournaments/${id}/comparison`),
+  startTournament: (id: string) => request(`/tournaments/${id}/start`, { method: 'POST' }),
+  cancelTournament: (id: string) => request(`/tournaments/${id}/cancel`, { method: 'POST' }),
+  getTournamentLeaderboard: (id: string) => request(`/tournaments/${id}/leaderboard`),
+  getTournamentComparison: (id: string) => request(`/tournaments/${id}/comparison`),
 };

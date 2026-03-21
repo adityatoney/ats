@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 import polars as pl
@@ -22,6 +23,7 @@ class DeterministicStrategyRuntime:
             for item in self.ir.inputs
             if item.defaultExpression is not None
         }
+        self.functions = {function.name: function for function in self.ir.functions}
         self.symbol_states: dict[str, dict[str, Any]] = {}
         self._last_signal_plan: dict[str, Any] | None = None
 
@@ -50,7 +52,7 @@ class DeterministicStrategyRuntime:
             ):
                 continue
 
-            plan = self._build_order_plan(order, state.symbol, price, portfolio)
+            plan = self._build_order_plan(order, state.symbol, price, portfolio, env)
             if not plan:
                 continue
 
@@ -114,6 +116,7 @@ class DeterministicStrategyRuntime:
             self.symbol_states[symbol] = {
                 "bar_values": [],
                 "persistent_values": {},
+                "security_cache": {},
             }
         return self.symbol_states[symbol]
 
@@ -150,10 +153,7 @@ class DeterministicStrategyRuntime:
                         portfolio,
                         env,
                     )
-                    if (
-                        calculation.kind == "reassign"
-                        or calculation.name in persistent_values
-                    ):
+                    if calculation.kind == "reassign" or calculation.name in persistent_values:
                         persistent_values[calculation.name] = value
 
                 env[calculation.name] = value
@@ -167,13 +167,7 @@ class DeterministicStrategyRuntime:
             **bar_values[state.bar_index],
         }
         env["__symbol__"] = state.symbol
-        env.update(
-            {
-                key: value
-                for key, value in persistent_values.items()
-                if key not in env
-            }
-        )
+        env.update({key: value for key, value in persistent_values.items() if key not in env})
         return env
 
     def _evaluate_expression(
@@ -422,10 +416,11 @@ class DeterministicStrategyRuntime:
         *,
         extra_context: dict[str, Any] | None = None,
     ) -> Any:
-        if (
-            name in self.input_values
-            and self.input_types.get(name) in {"source", "time", "timeframe"}
-        ):
+        if name in self.input_values and self.input_types.get(name) in {
+            "source",
+            "time",
+            "timeframe",
+        }:
             return self._resolve_input_value(
                 name,
                 history_rows,
@@ -439,6 +434,13 @@ class DeterministicStrategyRuntime:
             return extra_context[name]
         if name == "na":
             return None
+        if name == "time":
+            row = (
+                history_rows[bar_index]
+                if history_rows and 0 <= bar_index < len(history_rows)
+                else {}
+            )
+            return self._timestamp_to_epoch_ms(row.get("timestamp"))
         if name in self.input_values:
             return self._resolve_input_value(
                 name,
@@ -481,6 +483,11 @@ class DeterministicStrategyRuntime:
                 return position.avg_price if position else None
             return f"strategy.{expression.attr}"
 
+        if base.kind == "name" and base.name == "syminfo":
+            if expression.attr == "tickerid":
+                return env_current.get("__symbol__")
+            return f"syminfo.{expression.attr}"
+
         if base.kind == "name" and base.name in {
             "color",
             "shape",
@@ -488,6 +495,7 @@ class DeterministicStrategyRuntime:
             "size",
             "position",
             "barstate",
+            "ticker",
         }:
             return f"{base.name}.{expression.attr}"
 
@@ -553,6 +561,118 @@ class DeterministicStrategyRuntime:
             filtered = [value for value in values if value is not None]
             return min(filtered) if filtered else None
 
+        if call_path == "avg":
+            values = [
+                self._to_number(
+                    self._evaluate_expression(
+                        arg.value,
+                        history_rows,
+                        bar_index,
+                        symbol_state,
+                        portfolio,
+                        env_current,
+                        extra_context=extra_context,
+                    )
+                )
+                for arg in expression.args
+            ]
+            filtered = [value for value in values if value is not None]
+            return sum(filtered) / len(filtered) if filtered else None
+
+        if call_path == "math.abs":
+            value = self._to_number(
+                self._evaluate_expression(
+                    expression.args[0].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return abs(value) if value is not None else None
+
+        if call_path == "math.round":
+            value = self._to_number(
+                self._evaluate_expression(
+                    expression.args[0].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            if value is None:
+                return None
+            precision = 0
+            if len(expression.args) > 1:
+                precision_value = self._to_number(
+                    self._evaluate_expression(
+                        expression.args[1].value,
+                        history_rows,
+                        bar_index,
+                        symbol_state,
+                        portfolio,
+                        env_current,
+                        extra_context=extra_context,
+                    )
+                )
+                precision = int(precision_value or 0)
+            return round(value, precision)
+
+        if call_path == "na":
+            value = self._evaluate_expression(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            if value is None:
+                return True
+            if isinstance(value, float) and math.isnan(value):
+                return True
+            return False
+
+        if call_path == "timestamp":
+            return self._timestamp_from_call(
+                expression,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+
+        if call_path == "request.security":
+            return self._request_security(
+                expression,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+
+        if call_path in self.functions:
+            return self._evaluate_function_call(
+                call_path,
+                expression,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+
         if call_path == "nz":
             primary = self._evaluate_expression(
                 expression.args[0].value,
@@ -587,6 +707,24 @@ class DeterministicStrategyRuntime:
                 env_current,
                 extra_context=extra_context,
             )
+
+        if call_path == "ta.tr":
+            return self._true_range(history_rows, bar_index)
+
+        if call_path == "ta.atr":
+            length = int(
+                self._evaluate_expression(
+                    expression.args[0].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            tr_values = [self._true_range(history_rows, idx) for idx in range(bar_index + 1)]
+            return self._rma(tr_values, length)
 
         if call_path == "ta.sma":
             values = self._series_values(
@@ -722,6 +860,84 @@ class DeterministicStrategyRuntime:
             )
             return self._stdev(values, length)
 
+        if call_path == "ta.sum":
+            values = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            length = int(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._sum(values, length)
+
+        if call_path == "ta.highest":
+            source_expr = expression.args[0].value
+            length_arg = (
+                expression.args[1].value if len(expression.args) > 1 else expression.args[0].value
+            )
+            if len(expression.args) == 1:
+                source_expr = IRExpression(kind="name", name="high")
+            values = self._series_values(
+                source_expr,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            length = int(
+                self._evaluate_expression(
+                    length_arg,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._highest(values, length)
+
+        if call_path == "ta.lowest":
+            source_expr = expression.args[0].value
+            length_arg = (
+                expression.args[1].value if len(expression.args) > 1 else expression.args[0].value
+            )
+            if len(expression.args) == 1:
+                source_expr = IRExpression(kind="name", name="low")
+            values = self._series_values(
+                source_expr,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            length = int(
+                self._evaluate_expression(
+                    length_arg,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._lowest(values, length)
+
         if call_path == "ta.highestbars":
             values = self._series_values(
                 expression.args[0].value,
@@ -765,6 +981,231 @@ class DeterministicStrategyRuntime:
                 )
             )
             return self._lowestbars(values, length)
+
+        if call_path == "ta.pivotlow":
+            source_expr = expression.args[0].value
+            left_expr = (
+                expression.args[1].value if len(expression.args) > 2 else expression.args[0].value
+            )
+            right_expr = (
+                expression.args[2].value if len(expression.args) > 2 else expression.args[1].value
+            )
+            if len(expression.args) == 2:
+                source_expr = IRExpression(kind="name", name="low")
+            values = self._series_values(
+                source_expr,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            left = int(
+                self._evaluate_expression(
+                    left_expr,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            right = int(
+                self._evaluate_expression(
+                    right_expr,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._pivotlow(values, left, right)
+
+        if call_path == "ta.pivothigh":
+            source_expr = expression.args[0].value
+            left_expr = (
+                expression.args[1].value if len(expression.args) > 2 else expression.args[0].value
+            )
+            right_expr = (
+                expression.args[2].value if len(expression.args) > 2 else expression.args[1].value
+            )
+            if len(expression.args) == 2:
+                source_expr = IRExpression(kind="name", name="high")
+            values = self._series_values(
+                source_expr,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            left = int(
+                self._evaluate_expression(
+                    left_expr,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            right = int(
+                self._evaluate_expression(
+                    right_expr,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._pivothigh(values, left, right)
+
+        if call_path == "ta.valuewhen":
+            condition_series = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            value_series = self._series_values(
+                expression.args[1].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            occurrence = int(
+                self._evaluate_expression(
+                    expression.args[2].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._valuewhen(condition_series, value_series, occurrence)
+
+        if call_path == "ta.barssince":
+            condition_series = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            return self._barssince(condition_series)
+
+        if call_path == "ta.stoch":
+            source_values = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            high_values = self._series_values(
+                expression.args[1].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            low_values = self._series_values(
+                expression.args[2].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            length = int(
+                self._evaluate_expression(
+                    expression.args[3].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._stoch(source_values, high_values, low_values, length)
+
+        if call_path == "ta.supertrend":
+            factor = self._to_number(
+                self._evaluate_expression(
+                    expression.args[0].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            atr_length = int(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._supertrend(history_rows, bar_index, factor or 0.0, atr_length)
+
+        if call_path == "ta.linreg":
+            values = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            length = int(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            offset = (
+                int(
+                    self._evaluate_expression(
+                        expression.args[2].value,
+                        history_rows,
+                        bar_index,
+                        symbol_state,
+                        portfolio,
+                        env_current,
+                        extra_context=extra_context,
+                    )
+                )
+                if len(expression.args) > 2
+                else 0
+            )
+            return self._linreg(values, length, offset)
 
         if call_path == "ta.dmi":
             length = int(
@@ -873,7 +1314,60 @@ class DeterministicStrategyRuntime:
             )
             return self._crossunder(left, right)
 
+        if call_path == "ta.cross":
+            left = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            right = self._series_values(
+                expression.args[1].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            return self._crossover(left, right) or self._crossunder(left, right)
+
         return None
+
+    def _evaluate_function_call(
+        self,
+        function_name: str,
+        expression: IRExpression,
+        history_rows: list[dict[str, Any]],
+        bar_index: int,
+        symbol_state: dict[str, Any],
+        portfolio,
+        env_current: dict[str, Any],
+        *,
+        extra_context: dict[str, Any] | None = None,
+    ) -> Any:
+        function = self.functions[function_name]
+        local_context = dict(extra_context or {})
+        for param_name, arg in zip(function.params, expression.args):
+            local_context[param_name] = self._evaluate_expression(
+                arg.value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+        return self._evaluate_expression(
+            function.body,
+            history_rows,
+            bar_index,
+            symbol_state,
+            portfolio,
+            env_current,
+            extra_context=local_context,
+        )
 
     def _series_values(
         self,
@@ -946,6 +1440,7 @@ class DeterministicStrategyRuntime:
         symbol: str,
         price: float,
         portfolio,
+        env_current: dict[str, Any],
     ) -> dict[str, Any] | None:
         position = portfolio.positions.get(symbol)
         current_position = float(position.quantity) if position else 0.0
@@ -955,7 +1450,13 @@ class DeterministicStrategyRuntime:
             if target_abs <= 0:
                 return None
             target_position = target_abs if order.side == "long" else -target_abs
+        elif order.kind == "close":
+            target_position = 0.0
         else:
+            if current_position == 0:
+                return None
+            if not self._exit_order_is_triggered(order, position, env_current):
+                return None
             target_position = 0.0
 
         delta = int(round(target_position - current_position))
@@ -1016,6 +1517,91 @@ class DeterministicStrategyRuntime:
         if self.ir.meta.defaultQtyType == "cash":
             return max(0, int(self.ir.meta.defaultQtyValue / price))
         return max(0, int(self.ir.meta.defaultQtyValue))
+
+    def _exit_order_is_triggered(
+        self,
+        order: StrategyOrderAction,
+        position,
+        env_current: dict[str, Any],
+    ) -> bool:
+        if position is None:
+            return False
+        if all(value is None for value in (order.stop, order.limit, order.profit, order.loss)):
+            return True
+
+        high = self._to_number(env_current.get("high"))
+        low = self._to_number(env_current.get("low"))
+        avg_price = self._to_number(getattr(position, "avg_entry_price", None))
+        is_long = getattr(position, "quantity", 0) > 0
+
+        stop_price = (
+            self._to_number(
+                self._evaluate_expression(
+                    order.stop,
+                    [],
+                    0,
+                    {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                    None,
+                    env_current,
+                )
+            )
+            if order.stop is not None
+            else None
+        )
+        limit_price = (
+            self._to_number(
+                self._evaluate_expression(
+                    order.limit,
+                    [],
+                    0,
+                    {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                    None,
+                    env_current,
+                )
+            )
+            if order.limit is not None
+            else None
+        )
+
+        if avg_price is not None:
+            if order.loss is not None:
+                loss_value = self._to_number(
+                    self._evaluate_expression(
+                        order.loss,
+                        [],
+                        0,
+                        {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                        None,
+                        env_current,
+                    )
+                )
+                if loss_value is not None:
+                    stop_price = avg_price - loss_value if is_long else avg_price + loss_value
+            if order.profit is not None:
+                profit_value = self._to_number(
+                    self._evaluate_expression(
+                        order.profit,
+                        [],
+                        0,
+                        {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                        None,
+                        env_current,
+                    )
+                )
+                if profit_value is not None:
+                    limit_price = avg_price + profit_value if is_long else avg_price - profit_value
+
+        if is_long:
+            if stop_price is not None and low is not None and low <= stop_price:
+                return True
+            if limit_price is not None and high is not None and high >= limit_price:
+                return True
+        else:
+            if stop_price is not None and high is not None and high >= stop_price:
+                return True
+            if limit_price is not None and low is not None and low <= limit_price:
+                return True
+        return False
 
     def _apply_binary(self, op: str, left: Any, right: Any) -> Any:
         left_number = self._to_number(left)
@@ -1185,6 +1771,190 @@ class DeterministicStrategyRuntime:
         best_index = max(idx for idx, value in enumerate(window) if value == min_value)
         return best_index - (len(window) - 1)
 
+    def _highest(self, values: list[Any], length: int) -> float | None:
+        if length <= 0 or len(values) < length:
+            return None
+        window = [self._to_number(value) for value in values[-length:]]
+        if any(value is None for value in window):
+            return None
+        return max(window)
+
+    def _lowest(self, values: list[Any], length: int) -> float | None:
+        if length <= 0 or len(values) < length:
+            return None
+        window = [self._to_number(value) for value in values[-length:]]
+        if any(value is None for value in window):
+            return None
+        return min(window)
+
+    def _sum(self, values: list[Any], length: int) -> float | None:
+        if length <= 0 or len(values) < length:
+            return None
+        window = [self._to_number(value) for value in values[-length:]]
+        if any(value is None for value in window):
+            return None
+        return sum(window)
+
+    def _true_range(self, history_rows: list[dict[str, Any]], bar_index: int) -> float | None:
+        row = history_rows[bar_index] if 0 <= bar_index < len(history_rows) else None
+        if row is None:
+            return None
+        high = self._to_number(row.get("high"))
+        low = self._to_number(row.get("low"))
+        if high is None or low is None:
+            return None
+        if bar_index == 0:
+            return high - low
+        prev_close = self._to_number(history_rows[bar_index - 1].get("close"))
+        if prev_close is None:
+            return high - low
+        return max(high - low, abs(high - prev_close), abs(low - prev_close))
+
+    def _pivotlow(self, values: list[Any], left: int, right: int) -> float | None:
+        return self._pivot(values, left, right, mode="low")
+
+    def _pivothigh(self, values: list[Any], left: int, right: int) -> float | None:
+        return self._pivot(values, left, right, mode="high")
+
+    def _pivot(self, values: list[Any], left: int, right: int, *, mode: str) -> float | None:
+        if left < 0 or right < 0:
+            return None
+        candidate_index = len(values) - 1 - right
+        start = candidate_index - left
+        end = candidate_index + right
+        if start < 0 or end >= len(values):
+            return None
+        numeric_values = [self._to_number(value) for value in values[start : end + 1]]
+        if any(value is None for value in numeric_values):
+            return None
+        pivot_value = numeric_values[left]
+        if mode == "low":
+            if all(pivot_value <= value for value in numeric_values):
+                return pivot_value
+            return None
+        if all(pivot_value >= value for value in numeric_values):
+            return pivot_value
+        return None
+
+    def _valuewhen(self, conditions: list[Any], values: list[Any], occurrence: int) -> Any:
+        if occurrence < 0:
+            return None
+        matches = [
+            value for condition, value in zip(conditions, values) if self._is_truthy(condition)
+        ]
+        if occurrence >= len(matches):
+            return None
+        return matches[-1 - occurrence]
+
+    def _barssince(self, conditions: list[Any]) -> int | None:
+        for index in range(len(conditions) - 1, -1, -1):
+            if self._is_truthy(conditions[index]):
+                return len(conditions) - 1 - index
+        return None
+
+    def _stoch(
+        self,
+        source_values: list[Any],
+        high_values: list[Any],
+        low_values: list[Any],
+        length: int,
+    ) -> float | None:
+        if (
+            length <= 0
+            or len(source_values) < length
+            or len(high_values) < length
+            or len(low_values) < length
+        ):
+            return None
+        source = self._to_number(source_values[-1])
+        highs = [self._to_number(value) for value in high_values[-length:]]
+        lows = [self._to_number(value) for value in low_values[-length:]]
+        if source is None or any(value is None for value in highs + lows):
+            return None
+        highest_high = max(highs)
+        lowest_low = min(lows)
+        if highest_high == lowest_low:
+            return 0.0
+        return 100 * ((source - lowest_low) / (highest_high - lowest_low))
+
+    def _linreg(self, values: list[Any], length: int, offset: int = 0) -> float | None:
+        if length <= 1 or len(values) < length:
+            return None
+        window = [self._to_number(value) for value in values[-length:]]
+        if any(value is None for value in window):
+            return None
+        xs = list(range(length))
+        x_mean = sum(xs) / length
+        y_mean = sum(window) / length
+        denominator = sum((x - x_mean) ** 2 for x in xs)
+        if denominator == 0:
+            return None
+        slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, window)) / denominator
+        intercept = y_mean - slope * x_mean
+        target_x = length - 1 - offset
+        return intercept + slope * target_x
+
+    def _supertrend(
+        self,
+        history_rows: list[dict[str, Any]],
+        bar_index: int,
+        factor: float,
+        atr_length: int,
+    ) -> list[float | None]:
+        if atr_length <= 0 or bar_index < 0:
+            return [None, None]
+
+        highs = [self._to_number(row.get("high")) for row in history_rows[: bar_index + 1]]
+        lows = [self._to_number(row.get("low")) for row in history_rows[: bar_index + 1]]
+        closes = [self._to_number(row.get("close")) for row in history_rows[: bar_index + 1]]
+        if any(value is None for value in highs + lows + closes):
+            return [None, None]
+
+        tr_values = [self._true_range(history_rows, idx) for idx in range(bar_index + 1)]
+        atr_series = self._rma_series(tr_values, atr_length)
+        final_upper: list[float | None] = [None] * len(highs)
+        final_lower: list[float | None] = [None] * len(highs)
+        trend: list[float | None] = [None] * len(highs)
+        direction: list[float | None] = [None] * len(highs)
+
+        for idx in range(len(highs)):
+            atr = atr_series[idx]
+            if atr is None:
+                continue
+            hl2 = (highs[idx] + lows[idx]) / 2
+            basic_upper = hl2 + factor * atr
+            basic_lower = hl2 - factor * atr
+            if idx == 0 or final_upper[idx - 1] is None or final_lower[idx - 1] is None:
+                final_upper[idx] = basic_upper
+                final_lower[idx] = basic_lower
+                trend[idx] = basic_lower
+                direction[idx] = 1.0
+                continue
+
+            prev_upper = final_upper[idx - 1]
+            prev_lower = final_lower[idx - 1]
+            prev_close = closes[idx - 1]
+            prev_trend = trend[idx - 1]
+
+            final_upper[idx] = (
+                basic_upper if basic_upper < prev_upper or prev_close > prev_upper else prev_upper
+            )
+            final_lower[idx] = (
+                basic_lower if basic_lower > prev_lower or prev_close < prev_lower else prev_lower
+            )
+
+            if prev_trend == prev_upper:
+                trend[idx] = (
+                    final_upper[idx] if closes[idx] <= final_upper[idx] else final_lower[idx]
+                )
+            else:
+                trend[idx] = (
+                    final_lower[idx] if closes[idx] >= final_lower[idx] else final_upper[idx]
+                )
+            direction[idx] = 1.0 if trend[idx] == final_lower[idx] else -1.0
+
+        return [trend[-1], direction[-1]]
+
     def _macd(
         self,
         values: list[Any],
@@ -1268,6 +2038,194 @@ class DeterministicStrategyRuntime:
 
         adx_series = self._rma_series(dx_series, adx_smoothing)
         return [plus_di_series[-1], minus_di_series[-1], adx_series[-1]]
+
+    def _timestamp_from_call(
+        self,
+        expression: IRExpression,
+        history_rows: list[dict[str, Any]],
+        bar_index: int,
+        symbol_state: dict[str, Any],
+        portfolio,
+        env_current: dict[str, Any],
+        *,
+        extra_context: dict[str, Any] | None = None,
+    ) -> int | None:
+        values = [
+            self._evaluate_expression(
+                arg.value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+            for arg in expression.args
+        ]
+        timezone_name = "UTC"
+        if values and isinstance(values[0], str):
+            timezone_name = values.pop(0)
+        if len(values) < 3:
+            return None
+        year, month, day = [int(self._to_number(value) or 0) for value in values[:3]]
+        hour = int(self._to_number(values[3]) or 0) if len(values) > 3 else 0
+        minute = int(self._to_number(values[4]) or 0) if len(values) > 4 else 0
+        second = int(self._to_number(values[5]) or 0) if len(values) > 5 else 0
+        try:
+            tz = timezone.utc if timezone_name.upper() in {"UTC", "GMT", "GMT+0"} else timezone.utc
+            dt = datetime(year, month, day, hour, minute, second, tzinfo=tz)
+        except ValueError:
+            return None
+        return int(dt.timestamp() * 1000)
+
+    def _timestamp_to_epoch_ms(self, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        if not isinstance(value, str):
+            return None
+        normalized = value.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(normalized)
+        except ValueError:
+            for fmt in (
+                "%Y-%m-%d",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S",
+            ):
+                try:
+                    dt = datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+                    break
+                except ValueError:
+                    dt = None
+            if dt is None:
+                return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+
+    def _request_security(
+        self,
+        expression: IRExpression,
+        history_rows: list[dict[str, Any]],
+        bar_index: int,
+        symbol_state: dict[str, Any],
+        portfolio,
+        env_current: dict[str, Any],
+        *,
+        extra_context: dict[str, Any] | None = None,
+    ) -> Any:
+        symbol_value = self._evaluate_expression(
+            expression.args[0].value,
+            history_rows,
+            bar_index,
+            symbol_state,
+            portfolio,
+            env_current,
+            extra_context=extra_context,
+        )
+        current_symbol = env_current.get("__symbol__")
+        if symbol_value not in {current_symbol, None}:
+            return None
+
+        timeframe_value = self._evaluate_expression(
+            expression.args[1].value,
+            history_rows,
+            bar_index,
+            symbol_state,
+            portfolio,
+            env_current,
+            extra_context=extra_context,
+        )
+        resampled_rows = self._resample_history(history_rows, timeframe_value)
+        if not resampled_rows:
+            return None
+
+        current_timestamp = self._timestamp_to_epoch_ms(
+            history_rows[bar_index].get("timestamp") if history_rows else None
+        )
+        target_index = len(resampled_rows) - 1
+        if current_timestamp is not None:
+            for idx, row in enumerate(resampled_rows):
+                row_timestamp = self._timestamp_to_epoch_ms(row.get("timestamp"))
+                if row_timestamp is not None and row_timestamp > current_timestamp:
+                    target_index = max(idx - 1, 0)
+                    break
+
+        security_state = {
+            "bar_values": [],
+            "persistent_values": {},
+            "security_cache": {},
+        }
+        return self._evaluate_expression(
+            expression.args[2].value,
+            resampled_rows,
+            target_index,
+            security_state,
+            portfolio,
+            self._env_for_bar(resampled_rows, target_index, security_state, current_symbol),
+            extra_context=extra_context,
+        )
+
+    def _resample_history(
+        self,
+        history_rows: list[dict[str, Any]],
+        timeframe: Any,
+    ) -> list[dict[str, Any]]:
+        minutes = self._parse_timeframe_minutes(timeframe)
+        if minutes is None or not history_rows:
+            return history_rows
+
+        buckets: list[dict[str, Any]] = []
+        current_bucket_start = None
+        current_bucket = None
+        for row in history_rows:
+            ts = self._timestamp_to_epoch_ms(row.get("timestamp"))
+            if ts is None:
+                return history_rows
+            bucket_start = (ts // (minutes * 60 * 1000)) * (minutes * 60 * 1000)
+            if current_bucket_start != bucket_start:
+                current_bucket_start = bucket_start
+                current_bucket = dict(row)
+                current_bucket["timestamp"] = datetime.fromtimestamp(
+                    bucket_start / 1000,
+                    tz=timezone.utc,
+                ).isoformat()
+                buckets.append(current_bucket)
+                continue
+
+            assert current_bucket is not None
+            current_bucket["high"] = max(
+                self._to_number(current_bucket.get("high")) or float("-inf"),
+                self._to_number(row.get("high")) or float("-inf"),
+            )
+            current_bucket["low"] = min(
+                self._to_number(current_bucket.get("low")) or float("inf"),
+                self._to_number(row.get("low")) or float("inf"),
+            )
+            current_bucket["close"] = row.get("close")
+            current_bucket["volume"] = (self._to_number(current_bucket.get("volume")) or 0) + (
+                self._to_number(row.get("volume")) or 0
+            )
+
+        return buckets
+
+    def _parse_timeframe_minutes(self, timeframe: Any) -> int | None:
+        if isinstance(timeframe, (int, float)):
+            return int(timeframe)
+        if not isinstance(timeframe, str):
+            return None
+        normalized = timeframe.strip().upper()
+        if normalized.isdigit():
+            return int(normalized)
+        if normalized == "D":
+            return 60 * 24
+        if normalized == "W":
+            return 60 * 24 * 7
+        if normalized.endswith("H") and normalized[:-1].isdigit():
+            return int(normalized[:-1]) * 60
+        return None
 
     def _rma_series(self, values: list[Any], length: int) -> list[float | None]:
         results: list[float | None] = [None] * len(values)

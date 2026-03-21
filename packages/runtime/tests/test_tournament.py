@@ -1,15 +1,10 @@
 """Unit tests for tournament coordinator."""
-import asyncio
 from pathlib import Path
 
 import polars as pl
 import pytest
 
-from aegis_runtime.simulator.engine import Engine, EngineConfig
-from aegis_runtime.strategy.loader import StrategyLoader
-from aegis_runtime.strategy.parser import StrategyMarkdownParser
 from aegis_runtime.tournament.coordinator import TournamentCoordinator
-
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 

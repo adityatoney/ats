@@ -17,7 +17,6 @@ from aegis_runtime.simulator.types import (
     RiskDecision,
     Side,
     SignalProposal,
-    SizeDecision,
 )
 
 logger = logging.getLogger(__name__)

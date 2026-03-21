@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from aegis_runtime.simulator.market_state import MarketState
 from aegis_runtime.simulator.portfolio import PortfolioState
+from aegis_runtime.strategy.diagnostics import StrategyCompileError
 from aegis_runtime.strategy.loader import StrategyLoader
 from aegis_runtime.strategy.markdown_compiler import compile_markdown_source
 from aegis_runtime.strategy.pine_compiler import (
@@ -170,6 +172,38 @@ buy = close < open * (1 - threshold)
 strategy.entry("Long", true, when=buy)
 """
 
+NAMED_TITLE_PINE = """//@version=4
+strategy(overlay=true, title="Named Title", shorttitle="Named")
+buy = close > open
+strategy.entry("Long", true, when=buy)
+"""
+
+EXIT_STOP_LIMIT_PINE = """//@version=5
+strategy("Exit Args", overlay=true)
+buy = close > open
+stop_price = close - 1
+limit_price = close + 2
+strategy.entry("Long", strategy.long, when=buy, alert_message="go")
+strategy.exit("Exit", "Long", stop=stop_price, limit=limit_price, comment="managed", alert_message="done")
+"""
+
+REQUEST_SECURITY_PINE = """//@version=5
+strategy("Request Security", overlay=true)
+htf_close = request.security(syminfo.tickerid, "60", close)
+buy = close > htf_close
+strategy.entry("Long", strategy.long, when=buy)
+"""
+
+CONDITIONAL_REASSIGN_PINE = """//@version=5
+strategy("Conditional Reassign", overlay=true)
+var last_trade_was_loss = false
+if close < open
+    last_trade_was_loss := true
+if close > open
+    last_trade_was_loss := false
+strategy.entry("Long", strategy.long, when=last_trade_was_loss)
+"""
+
 
 def test_compile_ma_fixture_round_trips_through_ir_and_generated_python():
     source = MA_FIXTURE.read_text()
@@ -210,7 +244,7 @@ def test_compile_strict_markdown_yaml_to_ir_and_python():
     assert strategy_ir.meta.defaultQtyType == "percent_of_equity"
     assert [order.kind for order in strategy_ir.orders] == ["entry", "close"]
     StrategyValidator.validate(generated_python)
-    assert 'generated_by: aegis_ir_v1' in generated_python
+    assert "generated_by: aegis_ir_v1" in generated_python
 
 
 def test_generated_python_produces_buy_then_sell_flow():
@@ -220,7 +254,7 @@ def test_generated_python_produces_buy_then_sell_flow():
 
     df = pl.DataFrame(
         {
-            "timestamp": [f"2024-01-0{i+1}" for i in range(8)],
+            "timestamp": [f"2024-01-0{i + 1}" for i in range(8)],
             "open": [10, 9, 8, 9, 10, 11, 10, 9],
             "high": [10, 9, 8, 9, 10, 11, 10, 9],
             "low": [10, 9, 8, 9, 10, 11, 10, 9],
@@ -275,7 +309,7 @@ def test_compile_legacy_momentum_patterns_with_generic_input_and_series_indexing
     assert strategy_ir.inputs[0].type == "source"
     assert strategy_ir.orders[0].side == "long"
     assert strategy_ir.orders[1].side == "short"
-    assert "input.source(close, \"Source\")" in normalized_pine
+    assert 'input.source(close, "Source")' in normalized_pine
     assert "ma_fast[1]" in normalized_pine
 
     StrategyValidator.validate(generated_python)
@@ -292,7 +326,7 @@ def test_compile_dmi_tuple_destructuring_into_generated_python():
 
     df = pl.DataFrame(
         {
-            "timestamp": [f"2024-02-0{i+1}" for i in range(8)],
+            "timestamp": [f"2024-02-0{i + 1}" for i in range(8)],
             "open": [10.0, 10.5, 11.0, 11.5, 11.2, 11.8, 12.2, 12.5],
             "high": [10.2, 10.8, 11.3, 11.8, 11.5, 12.0, 12.5, 12.8],
             "low": [9.8, 10.2, 10.7, 11.1, 10.9, 11.5, 11.9, 12.2],
@@ -332,7 +366,7 @@ def test_compile_highestbars_and_lowestbars_expressions():
 
     df = pl.DataFrame(
         {
-            "timestamp": [f"2024-03-0{i+1}" for i in range(8)],
+            "timestamp": [f"2024-03-0{i + 1}" for i in range(8)],
             "open": [10.0, 10.2, 10.4, 10.1, 10.8, 11.0, 10.9, 11.2],
             "high": [10.1, 10.4, 10.7, 10.5, 11.0, 11.3, 11.1, 11.5],
             "low": [9.9, 10.0, 10.2, 9.8, 10.5, 10.8, 10.7, 11.0],
@@ -362,3 +396,57 @@ def test_compile_embedded_input_expression_by_hoisting_input():
     assert "threshold__input" in normalized_pine
     StrategyValidator.validate(generated_python)
     assert StrategyLoader.load_from_python(generated_python) is not None
+
+
+def test_compile_named_title_and_preserve_named_strategy_args():
+    strategy_ir = parse_pine_source(NAMED_TITLE_PINE)
+    normalized_pine = render_strategy_ir_to_pine(strategy_ir)
+
+    assert strategy_ir.meta.name == "Named Title"
+    assert 'strategy("Named Title"' in normalized_pine
+
+
+def test_compile_exit_stop_limit_and_ignore_metadata_only_args():
+    strategy_ir = parse_pine_source(EXIT_STOP_LIMIT_PINE)
+    normalized_pine = render_strategy_ir_to_pine(strategy_ir)
+    generated_python, _ = render_python_from_ir(strategy_ir)
+
+    exit_order = next(order for order in strategy_ir.orders if order.kind == "exit")
+    assert exit_order.fromEntryId == "Long"
+    assert exit_order.stop is not None
+    assert exit_order.limit is not None
+    assert 'strategy.exit("Exit", "Long", stop=stop_price, limit=limit_price)' in normalized_pine
+    StrategyValidator.validate(generated_python)
+
+
+def test_compile_request_security_expression():
+    strategy_ir = parse_pine_source(REQUEST_SECURITY_PINE)
+    normalized_pine = render_strategy_ir_to_pine(strategy_ir)
+    generated_python, _ = render_python_from_ir(strategy_ir)
+
+    assert any(calc.name == "htf_close" for calc in strategy_ir.indicators)
+    assert 'request.security(syminfo.tickerid, "60", close)' in normalized_pine
+    StrategyValidator.validate(generated_python)
+
+
+def test_compile_top_level_conditional_reassigns():
+    strategy_ir = parse_pine_source(CONDITIONAL_REASSIGN_PINE)
+    generated_python, _ = render_python_from_ir(strategy_ir)
+
+    assert any(calc.kind == "reassign" for calc in strategy_ir.indicators)
+    StrategyValidator.validate(generated_python)
+
+
+def test_parse_error_includes_structured_diagnostic_span():
+    invalid_source = """//@version=5
+strategy("Bad Parse", overlay=true)
+entryLong =
+"""
+
+    with pytest.raises(StrategyCompileError) as exc_info:
+        parse_pine_source(invalid_source)
+
+    diagnostic = exc_info.value.diagnostics[0]
+    assert diagnostic.code == "parse_error"
+    assert diagnostic.span is not None
+    assert diagnostic.span.line in {3, 4}

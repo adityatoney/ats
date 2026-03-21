@@ -5,6 +5,7 @@
     "rootDir": "src",
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "tsBuildInfoFile": "./node_modules/.cache/web.tsbuildinfo",
     "declaration": false,
     "declarationMap": false,
     "types": []

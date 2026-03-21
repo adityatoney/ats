@@ -1,5 +1,17 @@
 const PYTHON_BASE_URL = process.env.PYTHON_RUNTIME_URL || 'http://localhost:8000';
 
+export class PythonRuntimeError extends Error {
+  status: number;
+  diagnostics: Array<Record<string, unknown>>;
+
+  constructor(message: string, status: number, diagnostics: Array<Record<string, unknown>> = []) {
+    super(message);
+    this.name = 'PythonRuntimeError';
+    this.status = status;
+    this.diagnostics = diagnostics;
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const url = `${PYTHON_BASE_URL}${path}`;
   const res = await fetch(url, {
@@ -12,7 +24,20 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Python runtime error ${res.status}: ${body}`);
+    let detail: { message?: string; diagnostics?: Array<Record<string, unknown>> } | undefined;
+    try {
+      const json = JSON.parse(body) as {
+        detail?: { message?: string; diagnostics?: Array<Record<string, unknown>> };
+      };
+      detail = json.detail;
+    } catch {
+      detail = undefined;
+    }
+    throw new PythonRuntimeError(
+      detail?.message || `Python runtime error ${res.status}: ${body}`,
+      res.status,
+      detail?.diagnostics || [],
+    );
   }
 
   return res.json() as Promise<T>;
@@ -61,19 +86,18 @@ export const pythonClient = {
     });
   },
 
-  generateSoul(data: { runId: string; agentId: string; competitiveContext?: Record<string, unknown> }) {
+  generateSoul(data: {
+    runId: string;
+    agentId: string;
+    competitiveContext?: Record<string, unknown>;
+  }) {
     return request('/api/soul/generate', {
       method: 'POST',
       body: JSON.stringify(data),
     });
   },
 
-  prefetchData(data: {
-    symbols: string[];
-    startDate: string;
-    endDate: string;
-    timeframe: string;
-  }) {
+  prefetchData(data: { symbols: string[]; startDate: string; endDate: string; timeframe: string }) {
     return request('/api/data/prefetch', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -97,14 +121,6 @@ export const pythonClient = {
       body: JSON.stringify(data),
     });
   },
-
-  generateStrategy(data: { strategyMd: string }) {
-    return request<{ strategyPy: string; pineScript: string; valid: boolean; errors: string[] }>('/api/strategy/generate', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  },
-
   compileStrategy(data: { sourceKind: 'pine' | 'markdown_yaml'; source: string }) {
     return request<{
       strategyIrJson: Record<string, unknown>;

@@ -3,9 +3,9 @@ import logging
 from typing import Any
 
 from aegis_runtime.soul.prompts import (
+    SOUL_COMPETITIVE_PROMPT_TEMPLATE,
     SOUL_SYSTEM_PROMPT,
     SOUL_USER_PROMPT_TEMPLATE,
-    SOUL_COMPETITIVE_PROMPT_TEMPLATE,
 )
 from aegis_runtime.soul.schemas import SoulArtifacts, SoulJson
 
