@@ -16,11 +16,17 @@ from aegis_runtime.strategy.ir import (
 )
 
 _SCRIPT_VERSION_RE = re.compile(r"//@version=(\d+)")
-_SUPPORTED_INPUTS = {"input.int", "input.float", "input.string", "input.bool"}
 _SUPPORTED_EXPR_CALLS = {
     "ta.sma",
     "ta.ema",
     "ta.rsi",
+    "ta.rma",
+    "ta.change",
+    "ta.dmi",
+    "ta.macd",
+    "ta.stdev",
+    "ta.highestbars",
+    "ta.lowestbars",
     "ta.crossover",
     "ta.crossunder",
     "math.max",
@@ -30,8 +36,36 @@ _SUPPORTED_EXPR_CALLS = {
 }
 _SUPPORTED_STRATEGY_CALLS = {"strategy.entry", "strategy.close", "strategy.exit"}
 _SUPPORTED_PLOT_CALLS = {"plot", "plotshape", "bgcolor", "hline"}
-_PASSTHROUGH_CALLS = {"alertcondition", "table.new", "table.cell", "str.tostring"}
+_PASSTHROUGH_CALLS = {"alertcondition", "fill", "table.new", "table.cell", "str.tostring"}
 _PASSTHROUGH_ROOTS = {"table", "alertcondition", "barstate", "str", "position"}
+_CALL_ALIASES = {
+    "sma": "ta.sma",
+    "ema": "ta.ema",
+    "rsi": "ta.rsi",
+    "rma": "ta.rma",
+    "change": "ta.change",
+    "dmi": "ta.dmi",
+    "macd": "ta.macd",
+    "stdev": "ta.stdev",
+    "highestbars": "ta.highestbars",
+    "lowestbars": "ta.lowestbars",
+    "security": "request.security",
+    "crossover": "ta.crossover",
+    "crossunder": "ta.crossunder",
+    "max": "math.max",
+    "min": "math.min",
+}
+_INPUT_TYPE_ALIASES = {
+    "input.integer": "int",
+    "input.int": "int",
+    "input.float": "float",
+    "input.string": "string",
+    "input.bool": "bool",
+    "input.source": "source",
+    "input.time": "time",
+    "input.timeframe": "timeframe",
+    "input.resolution": "timeframe",
+}
 _COMPARISON_MAP = {
     "Eq": "==",
     "NotEq": "!=",
@@ -66,6 +100,7 @@ def _load_pynescript():
             Expr,
             Name,
             ReAssign,
+            Subscript,
             Tuple,
             UnaryOp,
             parse,
@@ -88,6 +123,7 @@ def _load_pynescript():
         "Expr": Expr,
         "Name": Name,
         "ReAssign": ReAssign,
+        "Subscript": Subscript,
         "Tuple": Tuple,
         "UnaryOp": UnaryOp,
         "parse": parse,
@@ -136,6 +172,8 @@ class _PineLowerer:
         self.orders: list[StrategyOrderAction] = []
         self.plots: list[StrategyPlot] = []
         self.passthrough: list[str] = []
+        self.literal_bindings: dict[str, object] = {}
+        self._active_input_replacements: dict[int, str] = {}
 
     def lower(self, module) -> StrategyIR:
         for statement in module.body:
@@ -214,7 +252,7 @@ class _PineLowerer:
         Call = self.api["Call"]
 
         if isinstance(expr, Call):
-            call_path = self._call_path(expr.func)
+            call_path = self._normalize_call_path(self._call_path(expr.func))
             if call_path == "strategy":
                 self.meta = self._lower_strategy_call(expr)
                 return
@@ -249,32 +287,99 @@ class _PineLowerer:
     def _lower_assign(self, statement) -> None:
         Call = self.api["Call"]
 
+        if type(statement.target).__name__ == "Tuple":
+            self._lower_tuple_assign(statement)
+            return
+
+        assignment_name = self._require_name(statement.target, statement)
+
         if isinstance(statement.value, Call):
-            call_path = self._call_path(statement.value.func)
-            if call_path in _SUPPORTED_INPUTS:
+            call_path = self._normalize_call_path(self._call_path(statement.value.func))
+            if self._is_supported_input_call(call_path):
                 self.inputs.append(self._lower_input(statement))
                 return
             if call_path == "table.new":
                 self.passthrough.append(self.unparse(statement).strip())
                 return
 
-        kind = (
-            "persistent_assign"
-            if type(getattr(statement, "mode", None)).__name__ == "Var"
-            else "assign"
-        )
-        type_hint = None
-        if getattr(statement, "type", None) is not None:
-            type_hint = self.unparse(statement.type).strip()
+        previous_replacements = self._active_input_replacements
+        self._active_input_replacements = {}
+        self._hoist_embedded_inputs(statement.value, assignment_name)
 
-        self.calculations.append(
-            StrategyCalculation(
-                name=self._require_name(statement.target, statement),
+        try:
+            kind = (
+                "persistent_assign"
+                if type(getattr(statement, "mode", None)).__name__ == "Var"
+                else "assign"
+            )
+            type_hint = None
+            if getattr(statement, "type", None) is not None:
+                type_hint = self.unparse(statement.type).strip()
+
+            calculation = StrategyCalculation(
+                name=assignment_name,
                 expression=self.lower_expression(statement.value),
                 kind=kind,
                 typeHint=type_hint,
             )
+            self.calculations.append(calculation)
+
+            literal_value = self._try_literal_value(statement.value)
+            if literal_value is not None:
+                self.literal_bindings[calculation.name] = literal_value
+        finally:
+            self._active_input_replacements = previous_replacements
+
+    def _lower_tuple_assign(self, statement) -> None:
+        target_names = [
+            self._require_name(element, statement)
+            for element in getattr(statement.target, "elts", [])
+        ]
+        value_expr = self.lower_expression(statement.value)
+        for index, name in enumerate(target_names):
+            self.calculations.append(
+                StrategyCalculation(
+                    name=name,
+                    expression=IRExpression(
+                        kind="subscript",
+                        base=value_expr,
+                        index=IRExpression(kind="constant", value=index),
+                    ),
+                )
+            )
+
+    def _is_supported_input_call(self, call_path: str) -> bool:
+        return call_path == "input" or call_path.startswith("input.")
+
+    def _hoist_embedded_inputs(self, node, assignment_name: str) -> None:
+        if type(node).__name__ == "Call":
+            call_path = self._normalize_call_path(self._call_path(node.func))
+            if self._is_supported_input_call(call_path):
+                synthetic_name = self._next_synthetic_input_name(assignment_name)
+                self.inputs.append(self._lower_input_from_call(synthetic_name, node, node))
+                self._active_input_replacements[id(node)] = synthetic_name
+                return
+
+        for value in vars(node).values():
+            if isinstance(value, list):
+                for item in value:
+                    if hasattr(item, "__dict__"):
+                        self._hoist_embedded_inputs(item, assignment_name)
+            elif hasattr(value, "__dict__"):
+                self._hoist_embedded_inputs(value, assignment_name)
+
+    def _next_synthetic_input_name(self, assignment_name: str) -> str:
+        suffix = len(
+            [
+                item
+                for item in self.inputs
+                if item.name == f"{assignment_name}__input"
+                or item.name.startswith(f"{assignment_name}__input_")
+            ]
         )
+        if suffix == 0:
+            return f"{assignment_name}__input"
+        return f"{assignment_name}__input_{suffix + 1}"
 
     def _lower_strategy_call(self, call) -> StrategyMeta:
         args = list(getattr(call, "args", []))
@@ -325,37 +430,126 @@ class _PineLowerer:
     def _lower_input(self, statement) -> StrategyInput:
         name = self._require_name(statement.target, statement)
         call = statement.value
-        call_path = self._call_path(call.func)
-        input_type = call_path.split(".")[-1]
-        args = list(call.args)
-        if not args:
+        return self._lower_input_from_call(name, call, statement)
+
+    def _lower_input_from_call(self, name: str, call, error_node) -> StrategyInput:
+        call_path = self._normalize_call_path(self._call_path(call.func))
+        positional_args = [arg for arg in call.args if arg.name is None]
+        named_args = {arg.name: arg.value for arg in call.args if arg.name is not None}
+
+        input_type = self._resolve_input_type(call_path, positional_args, named_args, error_node)
+        default_node = named_args.get("defval")
+        if default_node is None and positional_args:
+            default_node = positional_args[0].value
+        if default_node is None:
             raise compile_error(
                 "invalid_input",
                 f"Input {name} is missing a default value",
-                statement,
+                error_node,
             )
 
-        default = self._literal_value(args[0].value, statement)
+        default, default_expression = self._resolve_input_default(
+            default_node,
+            input_type,
+            error_node,
+        )
         title = None
         options = []
-        if len(args) > 1 and args[1].name is None:
-            title_value = self._literal_value(args[1].value, statement)
+        title_node = named_args.get("title")
+        if title_node is None and len(positional_args) > 1:
+            title_node = positional_args[1].value
+        if title_node is not None:
+            title_value = self._try_literal_value(title_node)
             if isinstance(title_value, str):
                 title = title_value
 
-        for arg in args:
-            if arg.name == "options":
-                options_value = self._literal_value(arg.value, statement)
-                if isinstance(options_value, list):
-                    options = options_value
+        options_node = named_args.get("options")
+        if options_node is not None:
+            options_value = self._literal_value(options_node, error_node)
+            if isinstance(options_value, list):
+                options = options_value
 
         return StrategyInput(
             name=name,
             type=input_type,
             default=default,
+            defaultExpression=default_expression,
             title=title,
             options=options,
         )
+
+    def _resolve_input_type(self, call_path, positional_args, named_args, statement) -> str:
+        if call_path != "input":
+            resolved = _INPUT_TYPE_ALIASES.get(call_path)
+            if resolved:
+                return resolved
+
+        type_node = named_args.get("type")
+        if type_node is not None:
+            type_path = self._expression_path(type_node)
+            resolved = _INPUT_TYPE_ALIASES.get(type_path)
+            if resolved:
+                return resolved
+            raise compile_error(
+                "unsupported_input_type",
+                f"Unsupported input type: {type_path}",
+                type_node,
+            )
+
+        defval_node = named_args.get("defval")
+        if defval_node is None and positional_args:
+            defval_node = positional_args[0].value
+
+        inferred_type = self._infer_input_type(defval_node)
+        if inferred_type:
+            return inferred_type
+
+        raise compile_error(
+            "unsupported_input_type",
+            f"Could not infer input type for {self._require_name(statement.target, statement)}",
+            statement,
+        )
+
+    def _infer_input_type(self, node) -> str | None:
+        if node is None:
+            return None
+
+        literal = self._try_literal_value(node)
+        if isinstance(literal, bool):
+            return "bool"
+        if isinstance(literal, int) and not isinstance(literal, bool):
+            return "int"
+        if isinstance(literal, float):
+            return "float"
+        if isinstance(literal, str):
+            return "string"
+
+        node_type = type(node).__name__
+        if node_type in {"Name", "Attribute", "Subscript"}:
+            return "source"
+        if (
+            node_type == "Call"
+            and self._normalize_call_path(self._call_path(node.func)) == "timestamp"
+        ):
+            return "time"
+        return None
+
+    def _resolve_input_default(
+        self,
+        node,
+        input_type: str,
+        error_node,
+    ) -> tuple[object, IRExpression | None]:
+        literal = self._try_literal_value(node)
+        if literal is not None:
+            return literal, None
+
+        expression = self.lower_expression(node)
+        if input_type == "source":
+            return self._expression_path(node), expression
+        if input_type in {"time", "timeframe"}:
+            return render_expression(expression), expression
+        raise compile_error("expected_literal", "Expected a literal value", error_node)
 
     def _lower_conditional_orders(
         self,
@@ -394,7 +588,8 @@ class _PineLowerer:
         if isinstance(child, Expr):
             if (
                 isinstance(child.value, Call)
-                and self._call_path(child.value.func) in _SUPPORTED_STRATEGY_CALLS
+                and self._normalize_call_path(self._call_path(child.value.func))
+                in _SUPPORTED_STRATEGY_CALLS
             ):
                 self._append_order(child.value, when)
                 return
@@ -409,7 +604,7 @@ class _PineLowerer:
         )
 
     def _append_order(self, call, when: IRExpression) -> None:
-        call_path = self._call_path(call.func)
+        call_path = self._normalize_call_path(self._call_path(call.func))
         args = list(call.args)
         if not args:
             raise compile_error(
@@ -422,6 +617,7 @@ class _PineLowerer:
         if not isinstance(order_id, str):
             raise compile_error("invalid_order_id", "Order id must be a string", call)
 
+        order_when = when
         if call_path == "strategy.entry":
             if len(args) < 2:
                 raise compile_error(
@@ -442,6 +638,11 @@ class _PineLowerer:
                 elif arg.name == "cash":
                     quantity = self.lower_expression(arg.value)
                     quantity_type = "cash"
+                elif arg.name == "when":
+                    order_when = self._combine_conditions(
+                        order_when,
+                        self.lower_expression(arg.value),
+                    )
                 elif arg.name is not None:
                     raise compile_error(
                         "unsupported_strategy_entry_arg",
@@ -454,7 +655,7 @@ class _PineLowerer:
                     kind="entry",
                     orderId=order_id,
                     side=side,
-                    when=when,
+                    when=order_when,
                     quantity=quantity,
                     quantityType=quantity_type,
                 )
@@ -462,11 +663,25 @@ class _PineLowerer:
             return
 
         if call_path == "strategy.close":
+            for arg in args[1:]:
+                if arg.name == "when":
+                    order_when = self._combine_conditions(
+                        order_when,
+                        self.lower_expression(arg.value),
+                    )
+                elif arg.name == "comment":
+                    continue
+                elif arg.name is not None:
+                    raise compile_error(
+                        "unsupported_strategy_close_arg",
+                        f"Unsupported strategy.close() argument: {arg.name}",
+                        arg.value,
+                    )
             self.orders.append(
                 StrategyOrderAction(
                     kind="close",
                     orderId=order_id,
-                    when=when,
+                    when=order_when,
                 )
             )
             return
@@ -478,6 +693,13 @@ class _PineLowerer:
                 if arg.name == "qty":
                     quantity = self.lower_expression(arg.value)
                     quantity_type = "qty"
+                elif arg.name == "when":
+                    order_when = self._combine_conditions(
+                        order_when,
+                        self.lower_expression(arg.value),
+                    )
+                elif arg.name in {"comment", "from_entry"}:
+                    continue
                 elif arg.name is not None:
                     raise compile_error(
                         "unsupported_strategy_exit_arg",
@@ -488,7 +710,7 @@ class _PineLowerer:
                 StrategyOrderAction(
                     kind="exit",
                     orderId=order_id,
-                    when=when,
+                    when=order_when,
                     quantity=quantity,
                     quantityType=quantity_type,
                 )
@@ -506,6 +728,7 @@ class _PineLowerer:
         BoolOp = self.api["BoolOp"]
         Compare = self.api["Compare"]
         Conditional = self.api["Conditional"]
+        Subscript = self.api["Subscript"]
         Tuple = self.api["Tuple"]
         UnaryOp = self.api["UnaryOp"]
 
@@ -522,8 +745,20 @@ class _PineLowerer:
                 attr=node.attr,
             )
 
+        if isinstance(node, Subscript):
+            return IRExpression(
+                kind="subscript",
+                base=self.lower_expression(node.value),
+                index=self.lower_expression(node.slice),
+            )
+
         if isinstance(node, Call):
-            call_path = self._call_path(node.func)
+            if id(node) in self._active_input_replacements:
+                return IRExpression(
+                    kind="name",
+                    name=self._active_input_replacements[id(node)],
+                )
+            call_path = self._normalize_call_path(self._call_path(node.func))
             if call_path.startswith("request."):
                 raise compile_error(
                     "unsupported_request_security",
@@ -542,7 +777,7 @@ class _PineLowerer:
                 )
             return IRExpression(
                 kind="call",
-                callee=self.lower_expression(node.func),
+                callee=self._path_expression(call_path),
                 args=[
                     IRCallArg(
                         name=arg.name,
@@ -607,7 +842,7 @@ class _PineLowerer:
                 orelse=self.lower_expression(node.orelse),
             )
 
-        if isinstance(node, Tuple):
+        if isinstance(node, Tuple) or type(node).__name__ == "List":
             return IRExpression(
                 kind="tuple",
                 elements=[self.lower_expression(element) for element in node.elts],
@@ -647,6 +882,8 @@ class _PineLowerer:
         expr = self.lower_expression(node)
         if expr.kind == "constant":
             return expr.value
+        if expr.kind == "name" and expr.name in self.literal_bindings:
+            return self.literal_bindings[expr.name]
         if expr.kind == "tuple":
             return [self._literal_from_ir(item, error_node or node) for item in expr.elements]
         raise compile_error(
@@ -658,9 +895,17 @@ class _PineLowerer:
     def _literal_from_ir(self, expr: IRExpression, error_node=None):
         if expr.kind == "constant":
             return expr.value
+        if expr.kind == "name" and expr.name in self.literal_bindings:
+            return self.literal_bindings[expr.name]
         if expr.kind == "tuple":
             return [self._literal_from_ir(item, error_node) for item in expr.elements]
         raise compile_error("expected_literal", "Expected a literal value", error_node)
+
+    def _try_literal_value(self, node):
+        try:
+            return self._literal_value(node)
+        except StrategyCompileError:
+            return None
 
     def _optional_literal(self, node, default):
         if node is None:
@@ -673,6 +918,11 @@ class _PineLowerer:
         return node.id
 
     def _resolve_entry_side(self, node) -> str:
+        if type(node).__name__ == "Constant":
+            if node.value is True:
+                return "long"
+            if node.value is False:
+                return "short"
         path = self._expression_path(node)
         if path == "strategy.long":
             return "long"
@@ -687,9 +937,30 @@ class _PineLowerer:
     def _true_expression(self) -> IRExpression:
         return IRExpression(kind="constant", value=True)
 
+    def _combine_conditions(
+        self,
+        inherited: IRExpression | None,
+        extra: IRExpression | None,
+    ) -> IRExpression:
+        if inherited is None:
+            return extra or self._true_expression()
+        if extra is None:
+            return inherited
+        return IRExpression(kind="bool", op="and", values=[inherited, extra])
+
     def _is_passthrough_if(self, if_node) -> bool:
         rendered = self.unparse(if_node).strip()
         return "table.cell(" in rendered or "barstate." in rendered
+
+    def _normalize_call_path(self, call_path: str) -> str:
+        return _CALL_ALIASES.get(call_path, call_path)
+
+    def _path_expression(self, call_path: str) -> IRExpression:
+        parts = call_path.split(".")
+        expression = IRExpression(kind="name", name=parts[0])
+        for part in parts[1:]:
+            expression = IRExpression(kind="attribute", base=expression, attr=part)
+        return expression
 
 
 def render_strategy_ir_to_pine(strategy_ir: StrategyIR) -> str:
@@ -733,6 +1004,9 @@ def render_expression(expression: IRExpression) -> str:
 
     if expression.kind == "attribute":
         return f"{render_expression(expression.base)}.{expression.attr}"
+
+    if expression.kind == "subscript":
+        return f"{render_expression(expression.base)}[{render_expression(expression.index)}]"
 
     if expression.kind == "call":
         args = []
@@ -787,7 +1061,12 @@ def _render_strategy_call(meta: StrategyMeta) -> str:
 
 
 def _render_input(input_def: StrategyInput) -> str:
-    args = [_render_constant(input_def.default)]
+    default_value = (
+        render_expression(input_def.defaultExpression)
+        if input_def.defaultExpression is not None
+        else _render_constant(input_def.default)
+    )
+    args = [default_value]
     if input_def.title:
         args.append(_render_constant(input_def.title))
     if input_def.options:
@@ -850,7 +1129,7 @@ def _render_constant(value) -> str:
 
 
 def _wrap(expression: IRExpression) -> str:
-    if expression.kind in {"constant", "name", "attribute", "call"}:
+    if expression.kind in {"constant", "name", "attribute", "subscript", "call"}:
         return render_expression(expression)
     return f"({render_expression(expression)})"
 

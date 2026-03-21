@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import polars as pl
@@ -15,6 +16,12 @@ class DeterministicStrategyRuntime:
             else StrategyIR.model_validate(strategy_ir)
         )
         self.input_values = {item.name: item.default for item in self.ir.inputs}
+        self.input_types = {item.name: item.type for item in self.ir.inputs}
+        self.input_default_expressions = {
+            item.name: item.defaultExpression
+            for item in self.ir.inputs
+            if item.defaultExpression is not None
+        }
         self.symbol_states: dict[str, dict[str, Any]] = {}
         self._last_signal_plan: dict[str, Any] | None = None
 
@@ -118,6 +125,7 @@ class DeterministicStrategyRuntime:
             bar_index = len(bar_values)
             row = dict(state.history[bar_index])
             env: dict[str, Any] = {**self.input_values, **row}
+            env["__symbol__"] = state.symbol
             env.update(persistent_values)
 
             calculated_values: dict[str, Any] = {}
@@ -153,7 +161,12 @@ class DeterministicStrategyRuntime:
 
             bar_values.append(calculated_values)
 
-        env = {**self.input_values, **state.history[state.bar_index], **bar_values[state.bar_index]}
+        env = {
+            **self.input_values,
+            **state.history[state.bar_index],
+            **bar_values[state.bar_index],
+        }
+        env["__symbol__"] = state.symbol
         env.update(
             {
                 key: value
@@ -189,6 +202,17 @@ class DeterministicStrategyRuntime:
 
         if expression.kind == "attribute":
             return self._resolve_attribute(
+                expression,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+
+        if expression.kind == "subscript":
+            return self._evaluate_subscript(
                 expression,
                 history_rows,
                 bar_index,
@@ -329,6 +353,65 @@ class DeterministicStrategyRuntime:
 
         return None
 
+    def _evaluate_subscript(
+        self,
+        expression: IRExpression,
+        history_rows: list[dict[str, Any]],
+        bar_index: int,
+        symbol_state: dict[str, Any],
+        portfolio,
+        env_current: dict[str, Any],
+        *,
+        extra_context: dict[str, Any] | None = None,
+    ) -> Any:
+        index_value = self._coerce_number(
+            self._evaluate_expression(
+                expression.index,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+                extra_context=extra_context,
+            )
+        )
+        if index_value is None:
+            return None
+
+        index = int(index_value)
+        base_value = self._evaluate_expression(
+            expression.base,
+            history_rows,
+            bar_index,
+            symbol_state,
+            portfolio,
+            env_current,
+            extra_context=extra_context,
+        )
+        if isinstance(base_value, (list, tuple)):
+            if 0 <= index < len(base_value):
+                return base_value[index]
+            return None
+
+        target_index = bar_index - index
+        if index < 0 or target_index < 0 or target_index >= len(history_rows):
+            return None
+        target_env = self._env_for_bar(
+            history_rows,
+            target_index,
+            symbol_state,
+            env_current.get("__symbol__"),
+        )
+        return self._evaluate_expression(
+            expression.base,
+            history_rows,
+            target_index,
+            symbol_state,
+            portfolio,
+            target_env,
+            extra_context=extra_context,
+        )
+
     def _resolve_name(
         self,
         name: str,
@@ -339,6 +422,17 @@ class DeterministicStrategyRuntime:
         *,
         extra_context: dict[str, Any] | None = None,
     ) -> Any:
+        if (
+            name in self.input_values
+            and self.input_types.get(name) in {"source", "time", "timeframe"}
+        ):
+            return self._resolve_input_value(
+                name,
+                history_rows,
+                bar_index,
+                symbol_state,
+                env_current,
+            )
         if name in env_current:
             return env_current[name]
         if extra_context and name in extra_context:
@@ -346,7 +440,13 @@ class DeterministicStrategyRuntime:
         if name == "na":
             return None
         if name in self.input_values:
-            return self.input_values[name]
+            return self._resolve_input_value(
+                name,
+                history_rows,
+                bar_index,
+                symbol_state,
+                env_current,
+            )
         if history_rows and 0 <= bar_index < len(history_rows):
             row = history_rows[bar_index]
             if name in row:
@@ -373,6 +473,12 @@ class DeterministicStrategyRuntime:
                 return portfolio.equity
             if expression.attr == "initial_capital":
                 return portfolio.initial_capital
+            symbol = env_current.get("__symbol__")
+            position = portfolio.positions.get(symbol) if symbol else None
+            if expression.attr == "position_size":
+                return position.quantity if position else 0
+            if expression.attr == "position_avg_price":
+                return position.avg_price if position else None
             return f"strategy.{expression.attr}"
 
         if base.kind == "name" and base.name in {
@@ -526,6 +632,52 @@ class DeterministicStrategyRuntime:
             )
             return self._ema(values, length)
 
+        if call_path == "ta.rma":
+            values = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            length = int(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._rma(values, length)
+
+        if call_path == "ta.change":
+            values = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            length = 1
+            if len(expression.args) > 1:
+                length = int(
+                    self._evaluate_expression(
+                        expression.args[1].value,
+                        history_rows,
+                        bar_index,
+                        symbol_state,
+                        portfolio,
+                        env_current,
+                        extra_context=extra_context,
+                    )
+                )
+            return self._change(values, length)
+
         if call_path == "ta.rsi":
             values = self._series_values(
                 expression.args[0].value,
@@ -547,6 +699,141 @@ class DeterministicStrategyRuntime:
                 )
             )
             return self._rsi(values, length)
+
+        if call_path == "ta.stdev":
+            values = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            length = int(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._stdev(values, length)
+
+        if call_path == "ta.highestbars":
+            values = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            length = int(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._highestbars(values, length)
+
+        if call_path == "ta.lowestbars":
+            values = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            length = int(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._lowestbars(values, length)
+
+        if call_path == "ta.dmi":
+            length = int(
+                self._evaluate_expression(
+                    expression.args[0].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            smoothing = int(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._dmi(history_rows, bar_index, length, smoothing)
+
+        if call_path == "ta.macd":
+            values = self._series_values(
+                expression.args[0].value,
+                history_rows,
+                bar_index,
+                symbol_state,
+                portfolio,
+                env_current,
+            )
+            fast_length = int(
+                self._evaluate_expression(
+                    expression.args[1].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            slow_length = int(
+                self._evaluate_expression(
+                    expression.args[2].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            signal_length = int(
+                self._evaluate_expression(
+                    expression.args[3].value,
+                    history_rows,
+                    bar_index,
+                    symbol_state,
+                    portfolio,
+                    env_current,
+                    extra_context=extra_context,
+                )
+            )
+            return self._macd(values, fast_length, slow_length, signal_length)
 
         if call_path == "ta.crossover":
             left = self._series_values(
@@ -599,9 +886,12 @@ class DeterministicStrategyRuntime:
     ) -> list[Any]:
         values = []
         for idx in range(current_index + 1):
-            env = {**self.input_values, **history_rows[idx]}
-            if idx < len(symbol_state["bar_values"]):
-                env.update(symbol_state["bar_values"][idx])
+            env = self._env_for_bar(
+                history_rows,
+                idx,
+                symbol_state,
+                env_current.get("__symbol__"),
+            )
             if idx == current_index:
                 env.update(env_current)
             values.append(
@@ -615,6 +905,40 @@ class DeterministicStrategyRuntime:
                 )
             )
         return values
+
+    def _env_for_bar(
+        self,
+        history_rows: list[dict[str, Any]],
+        bar_index: int,
+        symbol_state: dict[str, Any],
+        symbol: str | None,
+    ) -> dict[str, Any]:
+        env = {**self.input_values, **history_rows[bar_index]}
+        if bar_index < len(symbol_state["bar_values"]):
+            env.update(symbol_state["bar_values"][bar_index])
+        if symbol:
+            env["__symbol__"] = symbol
+        return env
+
+    def _resolve_input_value(
+        self,
+        name: str,
+        history_rows: list[dict[str, Any]],
+        bar_index: int,
+        symbol_state: dict[str, Any],
+        env_current: dict[str, Any],
+    ) -> Any:
+        default_expression = self.input_default_expressions.get(name)
+        if default_expression is not None:
+            return self._evaluate_expression(
+                default_expression,
+                history_rows,
+                bar_index,
+                symbol_state,
+                None,
+                env_current,
+            )
+        return self.input_values.get(name)
 
     def _build_order_plan(
         self,
@@ -718,6 +1042,10 @@ class DeterministicStrategyRuntime:
             if left_number is None or right_number in (None, 0):
                 return None
             return left_number % right_number
+        if op == "^":
+            if left_number is None or right_number is None:
+                return None
+            return left_number**right_number
         return None
 
     def _apply_comparison(self, op: str, left: Any, right: Any) -> bool:
@@ -766,6 +1094,37 @@ class DeterministicStrategyRuntime:
             ema = (value * alpha) + (ema * (1 - alpha))
         return ema
 
+    def _rma(self, values: list[Any], length: int) -> float | None:
+        if length <= 0 or len(values) < length:
+            return None
+        numeric_values = [self._to_number(value) for value in values]
+        if any(value is None for value in numeric_values[:length]):
+            return None
+        rma = sum(numeric_values[:length]) / length
+        for value in numeric_values[length:]:
+            if value is None:
+                return None
+            rma = ((rma * (length - 1)) + value) / length
+        return rma
+
+    def _ema_series(self, values: list[Any], length: int) -> list[float | None]:
+        if length <= 0:
+            return [None] * len(values)
+        numeric_values = [self._to_number(value) for value in values]
+        results: list[float | None] = [None] * len(values)
+        if len(values) < length or any(value is None for value in numeric_values[:length]):
+            return results
+        ema = sum(numeric_values[:length]) / length
+        results[length - 1] = ema
+        alpha = 2 / (length + 1)
+        for idx in range(length, len(numeric_values)):
+            value = numeric_values[idx]
+            if value is None:
+                return results
+            ema = (value * alpha) + (ema * (1 - alpha))
+            results[idx] = ema
+        return results
+
     def _rsi(self, values: list[Any], length: int) -> float | None:
         if length <= 0 or len(values) <= length:
             return None
@@ -786,6 +1145,164 @@ class DeterministicStrategyRuntime:
             return 100.0
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
+
+    def _change(self, values: list[Any], length: int = 1) -> float | None:
+        if length <= 0 or len(values) <= length:
+            return None
+        current = self._to_number(values[-1])
+        previous = self._to_number(values[-1 - length])
+        if current is None or previous is None:
+            return None
+        return current - previous
+
+    def _stdev(self, values: list[Any], length: int) -> float | None:
+        if length <= 0 or len(values) < length:
+            return None
+        window = [self._to_number(value) for value in values[-length:]]
+        if any(value is None for value in window):
+            return None
+        mean = sum(window) / length
+        variance = sum((value - mean) ** 2 for value in window) / length
+        return math.sqrt(variance)
+
+    def _highestbars(self, values: list[Any], length: int) -> int | None:
+        if length <= 0 or len(values) < length:
+            return None
+        window = [self._to_number(value) for value in values[-length:]]
+        if any(value is None for value in window):
+            return None
+        max_value = max(window)
+        best_index = max(idx for idx, value in enumerate(window) if value == max_value)
+        return best_index - (len(window) - 1)
+
+    def _lowestbars(self, values: list[Any], length: int) -> int | None:
+        if length <= 0 or len(values) < length:
+            return None
+        window = [self._to_number(value) for value in values[-length:]]
+        if any(value is None for value in window):
+            return None
+        min_value = min(window)
+        best_index = max(idx for idx, value in enumerate(window) if value == min_value)
+        return best_index - (len(window) - 1)
+
+    def _macd(
+        self,
+        values: list[Any],
+        fast_length: int,
+        slow_length: int,
+        signal_length: int,
+    ) -> list[float | None]:
+        fast_series = self._ema_series(values, fast_length)
+        slow_series = self._ema_series(values, slow_length)
+        macd_series: list[float | None] = []
+        for fast_value, slow_value in zip(fast_series, slow_series):
+            if fast_value is None or slow_value is None:
+                macd_series.append(None)
+            else:
+                macd_series.append(fast_value - slow_value)
+        valid_macd = [value for value in macd_series if value is not None]
+        signal_value = self._ema(valid_macd, signal_length)
+        macd_value = macd_series[-1] if macd_series else None
+        histogram = (
+            macd_value - signal_value
+            if macd_value is not None and signal_value is not None
+            else None
+        )
+        return [macd_value, signal_value, histogram]
+
+    def _dmi(
+        self,
+        history_rows: list[dict[str, Any]],
+        bar_index: int,
+        di_length: int,
+        adx_smoothing: int,
+    ) -> list[float | None]:
+        highs = [self._to_number(row.get("high")) for row in history_rows[: bar_index + 1]]
+        lows = [self._to_number(row.get("low")) for row in history_rows[: bar_index + 1]]
+        closes = [self._to_number(row.get("close")) for row in history_rows[: bar_index + 1]]
+        if any(value is None for value in highs + lows + closes):
+            return [None, None, None]
+        if len(highs) < 2:
+            return [None, None, None]
+
+        true_ranges = [None]
+        plus_dm = [None]
+        minus_dm = [None]
+        for idx in range(1, len(highs)):
+            high = highs[idx]
+            low = lows[idx]
+            prev_high = highs[idx - 1]
+            prev_low = lows[idx - 1]
+            prev_close = closes[idx - 1]
+            up_move = high - prev_high
+            down_move = prev_low - low
+            plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0.0)
+            minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0.0)
+            true_ranges.append(
+                max(
+                    high - low,
+                    abs(high - prev_close),
+                    abs(low - prev_close),
+                )
+            )
+
+        atr_series = self._rma_series(true_ranges, di_length)
+        plus_series = self._rma_series(plus_dm, di_length)
+        minus_series = self._rma_series(minus_dm, di_length)
+
+        plus_di_series: list[float | None] = []
+        minus_di_series: list[float | None] = []
+        dx_series: list[float | None] = []
+        for atr_value, plus_value, minus_value in zip(atr_series, plus_series, minus_series):
+            if atr_value in (None, 0) or plus_value is None or minus_value is None:
+                plus_di_series.append(None)
+                minus_di_series.append(None)
+                dx_series.append(None)
+                continue
+            plus_di = 100 * plus_value / atr_value
+            minus_di = 100 * minus_value / atr_value
+            plus_di_series.append(plus_di)
+            minus_di_series.append(minus_di)
+            total = plus_di + minus_di
+            dx_series.append(100 * abs(plus_di - minus_di) / total if total else None)
+
+        adx_series = self._rma_series(dx_series, adx_smoothing)
+        return [plus_di_series[-1], minus_di_series[-1], adx_series[-1]]
+
+    def _rma_series(self, values: list[Any], length: int) -> list[float | None]:
+        results: list[float | None] = [None] * len(values)
+        if length <= 0 or len(values) < length:
+            return results
+
+        numeric_values = [self._to_number(value) for value in values]
+        seed_window = numeric_values[:length]
+        if any(value is None for value in seed_window):
+            start = next(
+                (
+                    idx
+                    for idx in range(len(numeric_values) - length + 1)
+                    if all(value is not None for value in numeric_values[idx : idx + length])
+                ),
+                None,
+            )
+            if start is None:
+                return results
+            seed_window = numeric_values[start : start + length]
+            rma = sum(seed_window) / length
+            results[start + length - 1] = rma
+            begin = start + length
+        else:
+            rma = sum(seed_window) / length
+            results[length - 1] = rma
+            begin = length
+
+        for idx in range(begin, len(numeric_values)):
+            value = numeric_values[idx]
+            if value is None:
+                continue
+            rma = ((rma * (length - 1)) + value) / length
+            results[idx] = rma
+        return results
 
     def _crossover(self, left: list[Any], right: list[Any]) -> bool:
         if len(left) < 2 or len(right) < 2:

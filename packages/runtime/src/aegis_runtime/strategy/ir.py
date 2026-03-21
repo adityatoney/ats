@@ -8,6 +8,7 @@ ExpressionKind = Literal[
     "constant",
     "name",
     "attribute",
+    "subscript",
     "call",
     "binary",
     "comparison",
@@ -37,6 +38,7 @@ class IRExpression(BaseModel):
     op: str | None = None
     callee: "IRExpression | None" = None
     base: "IRExpression | None" = None
+    index: "IRExpression | None" = None
     left: "IRExpression | None" = None
     right: "IRExpression | None" = None
     operand: "IRExpression | None" = None
@@ -68,8 +70,9 @@ class StrategyMeta(BaseModel):
 
 class StrategyInput(BaseModel):
     name: str
-    type: Literal["int", "float", "string", "bool"]
+    type: Literal["int", "float", "string", "bool", "source", "time", "timeframe"]
     default: Any
+    defaultExpression: IRExpression | None = None
     title: str | None = None
     options: list[Any] = Field(default_factory=list)
 
