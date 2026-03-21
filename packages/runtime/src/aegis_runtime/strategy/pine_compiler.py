@@ -528,6 +528,10 @@ class _PineLowerer:
             self._optional_literal(named_args.pop("default_qty_value", None), 100.0)
         )
 
+        pyramiding = int(
+            self._optional_literal(named_args.pop("pyramiding", None), 0)
+        )
+
         additional_args = OrderedDict()
         for arg_name, arg_value in named_args.items():
             additional_args[arg_name] = self.lower_expression(arg_value)
@@ -539,6 +543,7 @@ class _PineLowerer:
             initialCapital=initial_capital,
             defaultQtyType=default_qty_type,
             defaultQtyValue=default_qty_value,
+            pyramiding=pyramiding,
             additionalArgs=additional_args,
         )
 

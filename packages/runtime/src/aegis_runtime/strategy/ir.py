@@ -65,6 +65,7 @@ class StrategyMeta(BaseModel):
     initialCapital: float = 100000.0
     defaultQtyType: str = "percent_of_equity"
     defaultQtyValue: float = 100.0
+    pyramiding: int = 0
     additionalArgs: dict[str, IRExpression] = Field(default_factory=dict)
 
 

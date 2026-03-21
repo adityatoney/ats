@@ -26,6 +26,9 @@ class DeterministicStrategyRuntime:
         self.functions = {function.name: function for function in self.ir.functions}
         self.symbol_states: dict[str, dict[str, Any]] = {}
         self._last_signal_plan: dict[str, Any] | None = None
+        # Track active exit orders per symbol (registered by strategy.exit, persist until position closes)
+        # Each entry is a dict with pre-computed stop/limit prices (frozen at registration time)
+        self._active_exits: dict[str, list[dict[str, Any]]] = {}
 
     def prepare_features(self, df: pl.DataFrame) -> pl.DataFrame:
         return df
@@ -38,6 +41,32 @@ class DeterministicStrategyRuntime:
         self._last_signal_plan = None
         if price is None or price <= 0:
             return None
+
+        # Collect ALL matching orders on this bar (TradingView processes all orders per bar)
+        position = portfolio.positions.get(state.symbol)
+        simulated_position = float(position.quantity) if position else 0.0
+        original_position = simulated_position
+        reasons: list[str] = []
+
+        # First, check persistent exit orders (registered by prior strategy.exit calls)
+        # These are checked every bar while a position exists, matching TradingView behavior
+        exit_triggered_this_bar = False
+        if simulated_position != 0 and state.symbol in self._active_exits:
+            remaining_exits = []
+            for exit_info in self._active_exits[state.symbol]:
+                if simulated_position == 0:
+                    remaining_exits.append(exit_info)
+                    continue
+                triggered = self._check_precomputed_exit(
+                    exit_info, position, env,
+                )
+                if triggered:
+                    simulated_position = 0.0
+                    exit_triggered_this_bar = True
+                    reasons.append(f"exit:{exit_info['orderId']}")
+                else:
+                    remaining_exits.append(exit_info)
+            self._active_exits[state.symbol] = remaining_exits
 
         for order in self.ir.orders:
             if not self._is_truthy(
@@ -52,19 +81,58 @@ class DeterministicStrategyRuntime:
             ):
                 continue
 
-            plan = self._build_order_plan(order, state.symbol, price, portfolio, env)
+            # Register exit orders persistently (TradingView behavior)
+            # Pre-compute stop/limit prices at registration time (frozen)
+            if order.kind == "exit":
+                exit_info = self._register_exit_order(order, position, env)
+                if exit_info:
+                    if state.symbol not in self._active_exits:
+                        self._active_exits[state.symbol] = []
+                    # Replace existing exit with same orderId
+                    self._active_exits[state.symbol] = [
+                        e for e in self._active_exits[state.symbol]
+                        if e["orderId"] != order.orderId
+                    ]
+                    self._active_exits[state.symbol].append(exit_info)
+                continue  # Don't process exit as immediate order; it's now registered
+
+            # In TradingView, when a SL/TP exit fires intra-bar, no new entries
+            # execute on the same bar — they start from the next bar
+            if exit_triggered_this_bar and order.kind == "entry":
+                continue
+
+            plan = self._build_order_plan(
+                order, state.symbol, price, portfolio, env,
+                override_position=simulated_position,
+            )
             if not plan:
                 continue
 
-            self._last_signal_plan = plan
-            return {
-                "action": plan["side"],
-                "symbol": state.symbol,
-                "confidence": 1.0,
-                "reason": f"{order.kind}:{order.orderId}",
-            }
+            # Update simulated position with this order's effect
+            simulated_position = plan["_target"]
+            reasons.append(f"{order.kind}:{order.orderId}")
 
-        return None
+        # Clear active exits if position is now flat
+        if simulated_position == 0 and state.symbol in self._active_exits:
+            self._active_exits[state.symbol] = []
+
+        # Compute net position change from all matched orders
+        net_delta = int(round(simulated_position - original_position))
+        if net_delta == 0:
+            return None
+
+        if net_delta > 0:
+            combined_plan = {"symbol": state.symbol, "side": "buy", "quantity": net_delta}
+        else:
+            combined_plan = {"symbol": state.symbol, "side": "sell", "quantity": abs(net_delta)}
+
+        self._last_signal_plan = combined_plan
+        return {
+            "action": combined_plan["side"],
+            "symbol": state.symbol,
+            "confidence": 1.0,
+            "reason": "+".join(reasons),
+        }
 
     def size_position(self, portfolio, signal) -> dict[str, Any]:
         if not self._last_signal_plan:
@@ -486,6 +554,8 @@ class DeterministicStrategyRuntime:
         if base.kind == "name" and base.name == "syminfo":
             if expression.attr == "tickerid":
                 return env_current.get("__symbol__")
+            if expression.attr == "mintick":
+                return 0.01  # US equities default; could be parameterized per symbol
             return f"syminfo.{expression.attr}"
 
         if base.kind == "name" and base.name in {
@@ -1441,15 +1511,28 @@ class DeterministicStrategyRuntime:
         price: float,
         portfolio,
         env_current: dict[str, Any],
+        override_position: float | None = None,
     ) -> dict[str, Any] | None:
         position = portfolio.positions.get(symbol)
-        current_position = float(position.quantity) if position else 0.0
+        if override_position is not None:
+            current_position = override_position
+        else:
+            current_position = float(position.quantity) if position else 0.0
 
         if order.kind == "entry":
             target_abs = self._quantity_for_order(order, price, portfolio)
             if target_abs <= 0:
                 return None
             target_position = target_abs if order.side == "long" else -target_abs
+
+            # Enforce pyramiding limit from strategy() declaration
+            max_pyramiding = self.ir.meta.pyramiding
+            if max_pyramiding == 0:
+                # pyramiding=0: no additional entries when a position exists in the same direction
+                if order.side == "long" and current_position > 0:
+                    return None
+                if order.side == "short" and current_position < 0:
+                    return None
         elif order.kind == "close":
             target_position = 0.0
         else:
@@ -1461,9 +1544,9 @@ class DeterministicStrategyRuntime:
 
         delta = int(round(target_position - current_position))
         if delta > 0:
-            return {"symbol": symbol, "side": "buy", "quantity": delta}
+            return {"symbol": symbol, "side": "buy", "quantity": delta, "_target": target_position}
         if delta < 0:
-            return {"symbol": symbol, "side": "sell", "quantity": abs(delta)}
+            return {"symbol": symbol, "side": "sell", "quantity": abs(delta), "_target": target_position}
         return None
 
     def _quantity_for_order(self, order: StrategyOrderAction, price: float, portfolio) -> int:
@@ -1564,8 +1647,11 @@ class DeterministicStrategyRuntime:
         )
 
         if avg_price is not None:
+            # TradingView's strategy.exit profit/loss are in ticks;
+            # actual price delta = ticks * mintick
+            mintick = 0.01  # US equities default
             if order.loss is not None:
-                loss_value = self._to_number(
+                loss_ticks = self._to_number(
                     self._evaluate_expression(
                         order.loss,
                         [],
@@ -1575,10 +1661,11 @@ class DeterministicStrategyRuntime:
                         env_current,
                     )
                 )
-                if loss_value is not None:
+                if loss_ticks is not None:
+                    loss_value = loss_ticks * mintick
                     stop_price = avg_price - loss_value if is_long else avg_price + loss_value
             if order.profit is not None:
-                profit_value = self._to_number(
+                profit_ticks = self._to_number(
                     self._evaluate_expression(
                         order.profit,
                         [],
@@ -1588,8 +1675,105 @@ class DeterministicStrategyRuntime:
                         env_current,
                     )
                 )
-                if profit_value is not None:
+                if profit_ticks is not None:
+                    profit_value = profit_ticks * mintick
                     limit_price = avg_price + profit_value if is_long else avg_price - profit_value
+
+        if is_long:
+            if stop_price is not None and low is not None and low <= stop_price:
+                return True
+            if limit_price is not None and high is not None and high >= limit_price:
+                return True
+        else:
+            if stop_price is not None and high is not None and high >= stop_price:
+                return True
+            if limit_price is not None and low is not None and low <= limit_price:
+                return True
+        return False
+
+    def _register_exit_order(
+        self,
+        order: StrategyOrderAction,
+        position,
+        env_current: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Pre-compute stop/limit prices at registration time.
+
+        In TradingView, strategy.exit() parameters are evaluated once when called
+        and the resulting prices persist until the position closes.
+        """
+        if position is None:
+            return None
+        avg_price = self._to_number(getattr(position, "avg_entry_price", None))
+        is_long = getattr(position, "quantity", 0) > 0
+        mintick = 0.01  # US equities default
+
+        stop_price = None
+        limit_price = None
+
+        if order.stop is not None:
+            stop_price = self._to_number(
+                self._evaluate_expression(
+                    order.stop, [], 0,
+                    {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                    None, env_current,
+                )
+            )
+
+        if order.limit is not None:
+            limit_price = self._to_number(
+                self._evaluate_expression(
+                    order.limit, [], 0,
+                    {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                    None, env_current,
+                )
+            )
+
+        if avg_price is not None:
+            if order.loss is not None:
+                loss_ticks = self._to_number(
+                    self._evaluate_expression(
+                        order.loss, [], 0,
+                        {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                        None, env_current,
+                    )
+                )
+                if loss_ticks is not None:
+                    loss_value = loss_ticks * mintick
+                    stop_price = avg_price - loss_value if is_long else avg_price + loss_value
+            if order.profit is not None:
+                profit_ticks = self._to_number(
+                    self._evaluate_expression(
+                        order.profit, [], 0,
+                        {"bar_values": [], "persistent_values": {}, "security_cache": {}},
+                        None, env_current,
+                    )
+                )
+                if profit_ticks is not None:
+                    profit_value = profit_ticks * mintick
+                    limit_price = avg_price + profit_value if is_long else avg_price - profit_value
+
+        return {
+            "orderId": order.orderId,
+            "is_long": is_long,
+            "stop_price": stop_price,
+            "limit_price": limit_price,
+        }
+
+    def _check_precomputed_exit(
+        self,
+        exit_info: dict[str, Any],
+        position,
+        env_current: dict[str, Any],
+    ) -> bool:
+        """Check if a pre-computed exit order is triggered on the current bar."""
+        if position is None:
+            return False
+        high = self._to_number(env_current.get("high"))
+        low = self._to_number(env_current.get("low"))
+        stop_price = exit_info.get("stop_price")
+        limit_price = exit_info.get("limit_price")
+        is_long = exit_info["is_long"]
 
         if is_long:
             if stop_price is not None and low is not None and low <= stop_price:
@@ -1712,21 +1896,26 @@ class DeterministicStrategyRuntime:
         return results
 
     def _rsi(self, values: list[Any], length: int) -> float | None:
+        """RSI using Wilder's smoothing (RMA), matching TradingView's ta.rsi."""
         if length <= 0 or len(values) <= length:
             return None
         numeric_values = [self._to_number(value) for value in values]
         if any(value is None for value in numeric_values):
             return None
-        gains = []
-        losses = []
+        changes = []
         for previous, current in zip(numeric_values[:-1], numeric_values[1:]):
-            change = current - previous
-            gains.append(max(change, 0))
-            losses.append(abs(min(change, 0)))
-        if len(gains) < length:
+            changes.append(current - previous)
+        if len(changes) < length:
             return None
-        avg_gain = sum(gains[-length:]) / length
-        avg_loss = sum(losses[-length:]) / length
+        # Seed with SMA over first `length` changes
+        gains = [max(c, 0) for c in changes[:length]]
+        losses_vals = [abs(min(c, 0)) for c in changes[:length]]
+        avg_gain = sum(gains) / length
+        avg_loss = sum(losses_vals) / length
+        # Apply Wilder's smoothing (RMA) for remaining changes
+        for change in changes[length:]:
+            avg_gain = ((avg_gain * (length - 1)) + max(change, 0)) / length
+            avg_loss = ((avg_loss * (length - 1)) + abs(min(change, 0))) / length
         if avg_loss == 0:
             return 100.0
         rs = avg_gain / avg_loss

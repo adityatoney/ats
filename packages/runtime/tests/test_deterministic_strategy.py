@@ -450,3 +450,123 @@ entryLong =
     assert diagnostic.code == "parse_error"
     assert diagnostic.span is not None
     assert diagnostic.span.line in {3, 4}
+
+
+PYRAMIDING_ZERO_PINE = """//@version=5
+strategy("Pyramiding Zero Test", overlay=true, pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=50)
+buy_signal = close > open
+sell_signal = close < open
+if buy_signal
+    strategy.entry("Long", strategy.long)
+if sell_signal
+    strategy.close("Long")
+"""
+
+
+def test_pyramiding_zero_blocks_duplicate_entries():
+    """With pyramiding=0, a second long entry while already long should be blocked."""
+    ir = parse_pine_source(PYRAMIDING_ZERO_PINE)
+    assert ir.meta.pyramiding == 0
+
+    python_code, _ = render_python_from_ir(ir)
+    StrategyValidator.validate(python_code)
+    strategy = StrategyLoader.load_from_python(python_code)
+
+    # Bar 0: close > open → buy signal fires, should produce entry
+    bars = [
+        {"timestamp": "2024-01-01", "open": 100.0, "high": 110.0, "low": 99.0, "close": 105.0, "volume": 1000},
+    ]
+    portfolio = PortfolioState(cash=100000, initial_capital=100000, high_water_mark=100000)
+    state = MarketState(current_bar=bars[0], bar_index=0, timestamp="2024-01-01", symbol="TEST", history=bars)
+    signal = strategy.generate_signal(state, portfolio)
+    assert signal is not None
+    assert signal["action"] == "buy"
+    size = strategy.size_position(portfolio, signal)
+    assert size["quantity"] > 0
+
+    # Simulate the fill: portfolio now holds a long position
+    fill_qty = size["quantity"]
+    portfolio.apply_fill("TEST", "buy", fill_qty, 105.0, 0.0)
+    assert portfolio.positions["TEST"].quantity > 0
+
+    # Bar 1: close > open again → buy signal fires, but pyramiding=0 should BLOCK it
+    bars.append(
+        {"timestamp": "2024-01-02", "open": 104.0, "high": 112.0, "low": 103.0, "close": 108.0, "volume": 1200},
+    )
+    state2 = MarketState(current_bar=bars[1], bar_index=1, timestamp="2024-01-02", symbol="TEST", history=bars)
+    portfolio.update_prices({"TEST": 108.0})
+    signal2 = strategy.generate_signal(state2, portfolio)
+    # With pyramiding=0, the entry should be blocked (no signal or no actionable plan)
+    if signal2 is not None:
+        size2 = strategy.size_position(portfolio, signal2)
+        # Even if a signal is returned, size should be 0 since entry is blocked
+        assert size2["quantity"] == 0 or size2["side"] == ""
+
+    # Bar 2: close < open → sell signal fires, should produce close (always allowed)
+    bars.append(
+        {"timestamp": "2024-01-03", "open": 110.0, "high": 111.0, "low": 104.0, "close": 106.0, "volume": 900},
+    )
+    state3 = MarketState(current_bar=bars[2], bar_index=2, timestamp="2024-01-03", symbol="TEST", history=bars)
+    portfolio.update_prices({"TEST": 106.0})
+    signal3 = strategy.generate_signal(state3, portfolio)
+    assert signal3 is not None
+    assert signal3["action"] == "sell"
+    size3 = strategy.size_position(portfolio, signal3)
+    assert size3["quantity"] > 0
+
+
+POSITION_FLIP_PINE = """//@version=5
+strategy("Position Flip Test", overlay=true, pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+longCondition = close > open
+shortCondition = close < open
+if longCondition
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+if shortCondition
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+"""
+
+
+def test_position_flip_close_and_entry_on_same_bar():
+    """When close + opposite-direction entry fire on the same bar, both should execute
+    atomically, resulting in a position flip (matching TradingView behavior)."""
+    ir = parse_pine_source(POSITION_FLIP_PINE)
+    assert ir.meta.pyramiding == 0
+
+    python_code, _ = render_python_from_ir(ir)
+    StrategyValidator.validate(python_code)
+    strategy = StrategyLoader.load_from_python(python_code)
+
+    # Bar 0: close > open → long entry
+    bars = [
+        {"timestamp": "2024-01-01", "open": 100.0, "high": 110.0, "low": 99.0, "close": 105.0, "volume": 1000},
+    ]
+    portfolio = PortfolioState(cash=100000, initial_capital=100000, high_water_mark=100000)
+    state = MarketState(current_bar=bars[0], bar_index=0, timestamp="2024-01-01", symbol="TEST", history=bars)
+    signal = strategy.generate_signal(state, portfolio)
+    assert signal is not None
+    assert signal["action"] == "buy"
+    size = strategy.size_position(portfolio, signal)
+    fill_qty = size["quantity"]
+    assert fill_qty > 0
+    portfolio.apply_fill("TEST", "buy", fill_qty, 105.0, 0.0)
+    assert portfolio.positions["TEST"].quantity > 0
+    long_qty = portfolio.positions["TEST"].quantity
+
+    # Bar 1: close < open → shortCondition fires.
+    # This should: close("Long") + entry("Short") → flip from +N to -N
+    bars.append(
+        {"timestamp": "2024-01-02", "open": 108.0, "high": 109.0, "low": 100.0, "close": 102.0, "volume": 1200},
+    )
+    portfolio.update_prices({"TEST": 102.0})
+    state2 = MarketState(current_bar=bars[1], bar_index=1, timestamp="2024-01-02", symbol="TEST", history=bars)
+    signal2 = strategy.generate_signal(state2, portfolio)
+    assert signal2 is not None
+    # Net effect: close long (sell long_qty) + open short (sell short_qty) → total sell
+    assert signal2["action"] == "sell"
+    size2 = strategy.size_position(portfolio, signal2)
+    # Quantity should be MORE than just closing the long (it should include the short entry)
+    assert size2["quantity"] > long_qty, (
+        f"Expected sell quantity > {long_qty} (close long + open short), got {size2['quantity']}"
+    )
