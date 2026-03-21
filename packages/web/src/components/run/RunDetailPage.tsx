@@ -120,7 +120,7 @@ export function RunDetailPage() {
             <h1 className="text-2xl font-bold mt-1">Run {(runData.id as string).slice(0, 8)}</h1>
             <p className="text-sm text-gray-500 mt-0.5">
               Status: <span className="text-gray-300">{status}</span>
-              {runData.configJson && (
+              {Boolean(runData.configJson) && (
                 <>
                   {' | '}
                   Symbols:{' '}

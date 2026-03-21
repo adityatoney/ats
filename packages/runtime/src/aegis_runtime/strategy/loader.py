@@ -32,6 +32,15 @@ class StrategyModuleAdapter:
             return self._module.risk_gate(order, portfolio, market)
         return {"approved": True, "reason": ""}
 
+    def get_runtime_state(self) -> dict[str, Any] | None:
+        if hasattr(self._module, "get_runtime_state"):
+            return self._module.get_runtime_state()
+        return None
+
+    def set_runtime_state(self, state: dict[str, Any] | None) -> None:
+        if hasattr(self._module, "set_runtime_state"):
+            self._module.set_runtime_state(state)
+
 
 class StrategyLoader:
     @staticmethod

@@ -9,6 +9,7 @@ import {
 } from '@aegis/db/schema';
 import { pythonClient } from '../lib/python-client';
 import { eventBus } from './event-bus';
+import { ensureDeterministicArtifacts } from './strategy-artifacts';
 
 export const tournamentManager = {
   async createTournament(
@@ -93,8 +94,9 @@ export const tournamentManager = {
     const runsConfig: Array<{
       runId: string;
       agentId: string;
-      strategyMd: string;
-      strategyPy: string | null;
+      sourceKind: string;
+      strategyPy: string;
+      strategyIrJson?: Record<string, unknown> | null;
       config: Record<string, unknown>;
     }> = [];
 
@@ -104,12 +106,16 @@ export const tournamentManager = {
         orderBy: (sv, { desc }) => [desc(sv.version)],
       });
       if (!latestStrategy) continue;
+      const runnableStrategy = await ensureDeterministicArtifacts(latestStrategy);
+      if (!runnableStrategy.strategyPy) {
+        throw new Error(`Agent ${entry.agentId} is missing executable strategy Python`);
+      }
 
       const [run] = await db
         .insert(runs)
         .values({
           agentId: entry.agentId,
-          strategyVersionId: latestStrategy.id,
+          strategyVersionId: runnableStrategy.id,
           tournamentId,
           status: 'pending',
           runType: 'backtest',
@@ -130,8 +136,9 @@ export const tournamentManager = {
       runsConfig.push({
         runId: run.id,
         agentId: entry.agentId,
-        strategyMd: latestStrategy.strategyMd,
-        strategyPy: latestStrategy.strategyPy,
+        sourceKind: runnableStrategy.sourceKind,
+        strategyPy: runnableStrategy.strategyPy,
+        strategyIrJson: runnableStrategy.strategyIrJson as Record<string, unknown> | null,
         config,
       });
     }

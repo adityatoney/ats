@@ -32,8 +32,26 @@ export const api = {
     request(`/projects/${projectId}/agents`, { method: 'POST', body: JSON.stringify(data) }),
   updateStrategy: (
     agentId: string,
-    data: { strategyMd: string; strategyPy?: string; configJson?: Record<string, unknown> },
+    data: {
+      sourceKind: 'pine' | 'markdown_yaml' | 'legacy_python';
+      strategyMd?: string;
+      strategyPine?: string;
+      strategyPy?: string;
+      strategyIrJson?: Record<string, unknown>;
+      configJson?: Record<string, unknown>;
+    },
   ) => request(`/agents/${agentId}/strategy`, { method: 'PUT', body: JSON.stringify(data) }),
+  compileStrategy: (data: { sourceKind: 'pine' | 'markdown_yaml'; source: string }) =>
+    request<{
+      strategyIrJson: Record<string, unknown>;
+      strategyPine: string;
+      strategyPy: string;
+      diagnostics: Array<Record<string, unknown>>;
+      roundtrippable: boolean;
+    }>(`/agents/compile-strategy`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   generateStrategy: (strategyMd: string) =>
     request<{ strategyPy: string; pineScript: string; valid: boolean; errors: string[] }>(`/agents/generate-strategy`, {
       method: 'POST',

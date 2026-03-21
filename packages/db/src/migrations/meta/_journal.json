@@ -15,6 +15,13 @@
       "when": 1773606244270,
       "tag": "0001_silly_lady_mastermind",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1774052398076,
+      "tag": "0002_luxuriant_talon",
+      "breakpoints": true
     }
   ]
 }

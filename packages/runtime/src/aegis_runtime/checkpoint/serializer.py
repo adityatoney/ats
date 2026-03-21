@@ -19,7 +19,6 @@ class EngineStateSerializer:
         state: dict[str, Any],
         data: dict[str, pl.DataFrame],
         strategy: Any | None = None,
-        parsed_strategy: Any | None = None,
         run_id: str = "",
         event_callback: Any | None = None,
     ) -> Engine:
@@ -47,7 +46,6 @@ class EngineStateSerializer:
             config=config,
             data=data,
             strategy=strategy,
-            parsed_strategy=parsed_strategy,
             run_id=run_id,
             event_callback=event_callback,
         )

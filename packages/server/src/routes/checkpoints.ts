@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../lib/db';
 import { checkpoints, runs, branches, strategyVersions } from '@aegis/db/schema';
 import { pythonClient } from '../lib/python-client';
+import { ensureDeterministicArtifacts } from '../services/strategy-artifacts';
 
 export const checkpointRoutes = new Hono();
 
@@ -25,6 +26,16 @@ checkpointRoutes.post('/:id/branch', async (c) => {
   const strategy = await db.query.strategyVersions.findFirst({
     where: eq(strategyVersions.id, parentRun.strategyVersionId),
   });
+  if (!strategy) {
+    return c.json({ error: { message: 'Strategy not found', code: 'NOT_FOUND' } }, 404);
+  }
+  const runnableStrategy = await ensureDeterministicArtifacts(strategy);
+  if (!runnableStrategy.strategyPy) {
+    return c.json(
+      { error: { message: 'Strategy Python artifact is missing', code: 'BAD_REQUEST' } },
+      400,
+    );
+  }
 
   const [newRun] = await db
     .insert(runs)
@@ -60,8 +71,9 @@ checkpointRoutes.post('/:id/branch', async (c) => {
     parentCheckpointId: checkpointId,
     parentRunId: checkpoint.runId,
     overrides: body.overrides || {},
-    strategyMd: strategy!.strategyMd,
-    strategyPy: strategy!.strategyPy,
+    sourceKind: runnableStrategy.sourceKind,
+    strategyPy: runnableStrategy.strategyPy,
+    strategyIrJson: runnableStrategy.strategyIrJson as Record<string, unknown> | null,
     config: parentRun.configJson as Record<string, unknown>,
   });
 

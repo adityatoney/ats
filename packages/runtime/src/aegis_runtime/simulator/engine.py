@@ -39,14 +39,12 @@ class Engine:
         config: EngineConfig,
         data: dict[str, pl.DataFrame],
         strategy: Any | None = None,
-        parsed_strategy: Any | None = None,
         run_id: str = "",
         event_callback: Callable[..., Awaitable[None]] | None = None,
     ):
         self.config = config
         self.data = data
         self.strategy = strategy
-        self.parsed_strategy = parsed_strategy
         self.run_id = run_id
         self.event_callback = event_callback
 
@@ -392,6 +390,11 @@ class Engine:
             ],
             "rng_state": list(self.rng.getstate()[1]),
             "event_count": self.event_count,
+            "strategy_state": (
+                self.strategy.get_runtime_state()
+                if self.strategy and hasattr(self.strategy, "get_runtime_state")
+                else None
+            ),
         }
 
     @staticmethod
@@ -400,7 +403,6 @@ class Engine:
         config: EngineConfig,
         data: dict[str, pl.DataFrame],
         strategy: Any | None = None,
-        parsed_strategy: Any | None = None,
         run_id: str = "",
         event_callback: Callable[..., Awaitable[None]] | None = None,
     ) -> "Engine":
@@ -408,7 +410,6 @@ class Engine:
             config=config,
             data=data,
             strategy=strategy,
-            parsed_strategy=parsed_strategy,
             run_id=run_id,
             event_callback=event_callback,
         )
@@ -438,6 +439,8 @@ class Engine:
 
         engine.bar_index = state["bar_index"]
         engine.event_count = state.get("event_count", 0)
+        if strategy and hasattr(strategy, "set_runtime_state"):
+            strategy.set_runtime_state(state.get("strategy_state"))
 
         return engine
 

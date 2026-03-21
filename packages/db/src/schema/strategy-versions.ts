@@ -9,8 +9,11 @@ export const strategyVersions = pgTable(
       .references(() => agents.id)
       .notNull(),
     version: integer('version').notNull(),
-    strategyMd: text('strategy_md').notNull(),
+    sourceKind: text('source_kind').notNull(),
+    strategyMd: text('strategy_md'),
+    strategyPine: text('strategy_pine'),
     strategyPy: text('strategy_py'),
+    strategyIrJson: jsonb('strategy_ir_json'),
     configJson: jsonb('config_json').default({}).notNull(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },

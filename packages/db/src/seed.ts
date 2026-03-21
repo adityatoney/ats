@@ -299,6 +299,7 @@ async function seed() {
   await db.insert(strategyVersions).values({
     agentId: agent.id,
     version: 1,
+    sourceKind: 'legacy_python',
     strategyMd: SAMPLE_STRATEGY_MD,
     strategyPy: SAMPLE_STRATEGY_PY,
     configJson: {
@@ -325,6 +326,7 @@ async function seed() {
   await db.insert(strategyVersions).values({
     agentId: meanRevAgent.id,
     version: 1,
+    sourceKind: 'legacy_python',
     strategyMd: MEAN_REVERTER_STRATEGY_MD,
     strategyPy: MEAN_REVERTER_STRATEGY_PY,
     configJson: { rsi_period: 14, oversold: 30, overbought: 70 },
@@ -342,6 +344,7 @@ async function seed() {
   await db.insert(strategyVersions).values({
     agentId: buyHoldAgent.id,
     version: 1,
+    sourceKind: 'legacy_python',
     strategyMd: BUY_HOLD_STRATEGY_MD,
     strategyPy: BUY_HOLD_STRATEGY_PY,
     configJson: {},

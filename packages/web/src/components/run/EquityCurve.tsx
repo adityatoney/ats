@@ -6,6 +6,14 @@ interface Props {
   orders?: Array<Record<string, unknown>>;
 }
 
+type EquityMarker = {
+  time: Time;
+  position: 'belowBar' | 'aboveBar';
+  color: string;
+  shape: 'arrowUp' | 'arrowDown';
+  text: string;
+};
+
 function parseDate(ts: string): { year: number; month: number; day: number } | null {
   const match = ts.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!match) return null;
@@ -195,7 +203,7 @@ function EquityChart({
 
     // Build markers for visible symbols, using order's own filledAtSim timestamp
     if (orders && orders.length > 0) {
-      const markers: SeriesMarker<Time>[] = orders
+      const markers = orders
         .filter((o) => visibleSymbols.has(o.symbol as string))
         .map((order) => {
           const side = order.side as string;
@@ -214,10 +222,10 @@ function EquityChart({
             text: `${side === 'buy' ? 'B' : 'S'} ${sym}`,
           };
         })
-        .filter((m): m is SeriesMarker<Time> => m !== null)
+        .filter((marker): marker is EquityMarker => marker !== null)
         .sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
 
-      lineSeries.setMarkers(markers);
+      lineSeries.setMarkers(markers as SeriesMarker<Time>[]);
     }
 
     chart.timeScale().fitContent();

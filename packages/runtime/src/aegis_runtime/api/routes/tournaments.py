@@ -19,8 +19,9 @@ NODE_SERVER_URL = os.getenv("NODE_SERVER_URL", "http://localhost:3001")
 class RunConfig(BaseModel):
     runId: str
     agentId: str
-    strategyMd: str
-    strategyPy: str | None = None
+    sourceKind: str
+    strategyPy: str
+    strategyIrJson: dict[str, Any] | None = None
     config: dict[str, Any]
 
 

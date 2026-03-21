@@ -22,8 +22,9 @@ export const pythonClient = {
   startRun(data: {
     runId: string;
     agentId: string;
-    strategyMd: string;
-    strategyPy: string | null;
+    sourceKind: string;
+    strategyPy: string;
+    strategyIrJson?: Record<string, unknown> | null;
     config: Record<string, unknown>;
   }) {
     return request('/api/runs/start', {
@@ -49,8 +50,9 @@ export const pythonClient = {
     parentCheckpointId: string;
     parentRunId: string;
     overrides: Record<string, unknown>;
-    strategyMd: string;
-    strategyPy: string | null;
+    sourceKind: string;
+    strategyPy: string;
+    strategyIrJson?: Record<string, unknown> | null;
     config: Record<string, unknown>;
   }) {
     return request('/api/runs/start-branch', {
@@ -83,8 +85,9 @@ export const pythonClient = {
     runs: Array<{
       runId: string;
       agentId: string;
-      strategyMd: string;
-      strategyPy: string | null;
+      sourceKind: string;
+      strategyPy: string;
+      strategyIrJson?: Record<string, unknown> | null;
       config: Record<string, unknown>;
     }>;
     dataSnapshotId: string;
@@ -97,6 +100,26 @@ export const pythonClient = {
 
   generateStrategy(data: { strategyMd: string }) {
     return request<{ strategyPy: string; pineScript: string; valid: boolean; errors: string[] }>('/api/strategy/generate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  compileStrategy(data: { sourceKind: 'pine' | 'markdown_yaml'; source: string }) {
+    return request<{
+      strategyIrJson: Record<string, unknown>;
+      strategyPine: string;
+      strategyPy: string;
+      diagnostics: Array<Record<string, unknown>>;
+      roundtrippable: boolean;
+    }>('/api/strategy/compile', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  validateStrategyPython(data: { strategyPy: string }) {
+    return request<{ valid: boolean; errors: string[] }>('/api/strategy/validate-python', {
       method: 'POST',
       body: JSON.stringify(data),
     });

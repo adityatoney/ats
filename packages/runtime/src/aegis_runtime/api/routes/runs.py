@@ -10,7 +10,6 @@ from aegis_runtime.checkpoint.manager import CheckpointManager
 from aegis_runtime.data.data_loader import DataLoader
 from aegis_runtime.simulator.engine import Engine, EngineConfig
 from aegis_runtime.strategy.loader import StrategyLoader
-from aegis_runtime.strategy.parser import StrategyMarkdownParser
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,8 +23,9 @@ engine_registry: dict[str, Engine] = {}
 class StartRunRequest(BaseModel):
     runId: str
     agentId: str
-    strategyMd: str
-    strategyPy: str | None = None
+    sourceKind: str
+    strategyPy: str
+    strategyIrJson: dict[str, Any] | None = None
     config: dict[str, Any]
 
 
@@ -34,8 +34,9 @@ class StartBranchRequest(BaseModel):
     parentCheckpointId: str
     parentRunId: str
     overrides: dict[str, Any]
-    strategyMd: str
-    strategyPy: str | None = None
+    sourceKind: str
+    strategyPy: str
+    strategyIrJson: dict[str, Any] | None = None
     config: dict[str, Any]
 
 
@@ -62,13 +63,8 @@ async def run_backtest(request: StartRunRequest):
     try:
         await send_event(run_id, "run.started", {})
 
-        # Parse strategy
-        parsed = StrategyMarkdownParser.parse(request.strategyMd)
-
         # Load strategy module
-        strategy = None
-        if request.strategyPy:
-            strategy = StrategyLoader.load_from_python(request.strategyPy)
+        strategy = StrategyLoader.load_from_python(request.strategyPy)
 
         # Load market data
         symbols = config.get("symbols", ["AAPL"])
@@ -93,7 +89,6 @@ async def run_backtest(request: StartRunRequest):
             config=engine_config,
             data=data,
             strategy=strategy,
-            parsed_strategy=parsed,
             run_id=run_id,
             event_callback=send_event,
         )
@@ -120,10 +115,7 @@ async def run_branch(request: StartBranchRequest):
     try:
         await send_event(run_id, "run.started", {})
 
-        parsed = StrategyMarkdownParser.parse(request.strategyMd)
-        strategy = None
-        if request.strategyPy:
-            strategy = StrategyLoader.load_from_python(request.strategyPy)
+        strategy = StrategyLoader.load_from_python(request.strategyPy)
 
         config = request.config
         symbols = config.get("symbols", ["AAPL"])
@@ -152,7 +144,6 @@ async def run_branch(request: StartBranchRequest):
             config=engine_config,
             data=data,
             strategy=strategy,
-            parsed_strategy=parsed,
             run_id=run_id,
             event_callback=send_event,
         )

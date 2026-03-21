@@ -3,6 +3,7 @@ import { db } from '../lib/db';
 import { runs, strategyVersions, agents } from '@aegis/db/schema';
 import { pythonClient } from '../lib/python-client';
 import { eventBus } from './event-bus';
+import { ensureDeterministicArtifacts } from './strategy-artifacts';
 
 export const runManager = {
   async startBacktest(agentId: string, config: Record<string, unknown>) {
@@ -16,12 +17,14 @@ export const runManager = {
       orderBy: (sv, { desc }) => [desc(sv.version)],
     });
     if (!latestStrategy) throw new Error('No strategy version found');
+    const runnableStrategy = await ensureDeterministicArtifacts(latestStrategy);
+    if (!runnableStrategy.strategyPy) throw new Error('Strategy Python artifact is missing');
 
     const [run] = await db
       .insert(runs)
       .values({
         agentId,
-        strategyVersionId: latestStrategy.id,
+        strategyVersionId: runnableStrategy.id,
         status: 'pending',
         runType: 'backtest',
         configJson: config,
@@ -35,8 +38,9 @@ export const runManager = {
     await pythonClient.startRun({
       runId: run.id,
       agentId,
-      strategyMd: latestStrategy.strategyMd,
-      strategyPy: latestStrategy.strategyPy,
+      sourceKind: runnableStrategy.sourceKind,
+      strategyPy: runnableStrategy.strategyPy,
+      strategyIrJson: runnableStrategy.strategyIrJson as Record<string, unknown> | null,
       config,
     });
 

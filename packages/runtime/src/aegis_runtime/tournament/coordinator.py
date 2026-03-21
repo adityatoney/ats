@@ -2,10 +2,8 @@ import asyncio
 import logging
 from typing import Any
 
-from aegis_runtime.data.data_loader import DataLoader
 from aegis_runtime.simulator.engine import Engine, EngineConfig
 from aegis_runtime.strategy.loader import StrategyLoader
-from aegis_runtime.strategy.parser import StrategyMarkdownParser
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +55,8 @@ class TournamentCoordinator:
         try:
             await self.event_callback(run_id, "run.started", {})
 
-            # Parse strategy
-            parsed = StrategyMarkdownParser.parse(run_cfg["strategyMd"])
-
             # Load strategy module
-            strategy = None
-            if run_cfg.get("strategyPy"):
-                strategy = StrategyLoader.load_from_python(run_cfg["strategyPy"])
+            strategy = StrategyLoader.load_from_python(run_cfg["strategyPy"])
 
             # Create engine config
             engine_config = EngineConfig(
@@ -81,7 +74,6 @@ class TournamentCoordinator:
                 config=engine_config,
                 data=shared_data,
                 strategy=strategy,
-                parsed_strategy=parsed,
                 run_id=run_id,
                 event_callback=self.event_callback,
             )

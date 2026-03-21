@@ -29,10 +29,51 @@ export interface CreateAgentRequest {
   name: string;
 }
 
+export type StrategySourceKind = 'pine' | 'markdown_yaml' | 'legacy_python';
+
 export interface UpdateStrategyRequest {
-  strategyMd: string;
+  sourceKind: StrategySourceKind;
+  strategyMd?: string;
+  strategyPine?: string;
   strategyPy?: string;
+  strategyIrJson?: Record<string, unknown>;
   configJson?: Record<string, unknown>;
+}
+
+export interface CompileStrategyRequest {
+  sourceKind: 'pine' | 'markdown_yaml';
+  source: string;
+}
+
+export interface CompileStrategyResponse {
+  strategyIrJson: Record<string, unknown>;
+  strategyPine: string;
+  strategyPy: string;
+  diagnostics: Array<{
+    code: string;
+    message: string;
+    severity: 'error' | 'warning';
+    span?: {
+      line?: number | null;
+      column?: number | null;
+      endLine?: number | null;
+      endColumn?: number | null;
+    } | null;
+  }>;
+  roundtrippable: boolean;
+}
+
+export interface StrategyVersionResponse {
+  id: string;
+  agentId: string;
+  version: number;
+  sourceKind: StrategySourceKind;
+  strategyMd: string | null;
+  strategyPine: string | null;
+  strategyPy: string | null;
+  strategyIrJson: Record<string, unknown> | null;
+  configJson: Record<string, unknown>;
+  createdAt: string;
 }
 
 export interface StartBacktestRequest {
