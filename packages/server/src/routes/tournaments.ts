@@ -10,8 +10,22 @@ import {
   portfolioSnapshots,
 } from '@aegis/db/schema';
 import { tournamentManager } from '../services/tournament-manager';
+import { deleteTournament } from '../services/delete-service';
 
 export const tournamentRoutes = new Hono();
+
+// Delete tournament
+tournamentRoutes.delete('/:id', async (c) => {
+  const id = c.req.param('id');
+  try {
+    await deleteTournament(id);
+    return c.json({ data: { deleted: true } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Delete failed';
+    const status = message.includes('not found') ? 404 : message.includes('Cannot delete') ? 409 : 500;
+    return c.json({ error: { message, code: 'DELETE_FAILED' } }, status);
+  }
+});
 
 // Create tournament
 tournamentRoutes.post('/', async (c) => {

@@ -151,4 +151,9 @@ export const api = {
   cancelTournament: (id: string) => request(`/tournaments/${id}/cancel`, { method: 'POST' }),
   getTournamentLeaderboard: (id: string) => request(`/tournaments/${id}/leaderboard`),
   getTournamentComparison: (id: string) => request(`/tournaments/${id}/comparison`),
+
+  // Delete
+  deleteAgent: (id: string) => request(`/agents/${id}`, { method: 'DELETE' }),
+  deleteTournament: (id: string) => request(`/tournaments/${id}`, { method: 'DELETE' }),
+  deleteRun: (id: string) => request(`/runs/${id}`, { method: 'DELETE' }),
 };

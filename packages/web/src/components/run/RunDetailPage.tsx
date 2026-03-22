@@ -1,7 +1,8 @@
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useState, useEffect, useRef } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Layout } from '../ui/Layout';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useRun, useRunOrders, useRunPortfolio } from '../../hooks/useRun';
 import { useSSE } from '../../hooks/useSSE';
 import { api } from '../../lib/api-client';
@@ -10,6 +11,7 @@ import { TradeLedger } from './TradeLedger';
 
 export function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { data: run, isLoading, refetch } = useRun(id);
   const { data: orders } = useRunOrders(id);
@@ -19,6 +21,26 @@ export function RunDetailPage() {
     'overview',
   );
   const prevEventCount = useRef(0);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteRun(id!),
+    onSuccess: () => {
+      const agentId = (run as Record<string, unknown>)?.agentId as string | undefined;
+      queryClient.invalidateQueries({ queryKey: ['agents'] });
+      if (agentId) {
+        queryClient.invalidateQueries({ queryKey: ['agent-runs', agentId] });
+        navigate(`/agents/${agentId}`);
+      } else {
+        navigate('/');
+      }
+    },
+    onError: (err) => {
+      setShowDeleteConfirm(false);
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete run');
+    },
+  });
 
   // SSE-driven query invalidation: when new events arrive, refetch relevant data
   useEffect(() => {
@@ -138,8 +160,31 @@ export function RunDetailPage() {
               className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-gray-500'}`}
             />
             <RunControls status={status} runId={id!} onAction={refetch} />
+            {['completed', 'failed', 'cancelled'].includes(status) && (
+              <button
+                onClick={() => setShowDeleteConfirm(true)}
+                className="px-3 py-1 bg-red-600 text-white rounded text-sm hover:bg-red-700"
+              >
+                Delete
+              </button>
+            )}
           </div>
         </div>
+
+        <ConfirmDialog
+          open={showDeleteConfirm}
+          title="Delete Run"
+          message="This will permanently delete this run and all its trade history, snapshots, and events. This cannot be undone."
+          onConfirm={() => deleteMutation.mutate()}
+          onCancel={() => setShowDeleteConfirm(false)}
+          isLoading={deleteMutation.isPending}
+        />
+
+        {deleteError && (
+          <div className="rounded-lg border border-red-700 bg-red-900/50 p-3 text-sm text-red-300">
+            {deleteError}
+          </div>
+        )}
 
         {/* Progress */}
         {(status === 'running' || status === 'pending') && (

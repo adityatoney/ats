@@ -8,8 +8,21 @@ import {
   compileDeterministicArtifacts,
   ensureDeterministicArtifacts,
 } from '../services/strategy-artifacts';
+import { deleteAgent } from '../services/delete-service';
 
 export const agentRoutes = new Hono();
+
+agentRoutes.delete('/:id', async (c) => {
+  const id = c.req.param('id');
+  try {
+    await deleteAgent(id);
+    return c.json({ data: { deleted: true } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Delete failed';
+    const status = message.includes('not found') ? 404 : message.includes('Cannot delete') ? 409 : 500;
+    return c.json({ error: { message, code: 'DELETE_FAILED' } }, status);
+  }
+});
 
 agentRoutes.get('/', async (c) => {
   const allAgents = await db.query.agents.findMany({

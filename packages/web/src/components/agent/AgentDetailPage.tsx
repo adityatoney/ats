@@ -1,7 +1,8 @@
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useState, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Layout } from '../ui/Layout';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useAgent } from '../../hooks/useAgent';
 import { ApiError, api } from '../../lib/api-client';
 
@@ -27,8 +28,24 @@ type Diagnostic = {
 
 export function AgentDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { data: agent, isLoading, refetch } = useAgent(id);
   const [activeTab, setActiveTab] = useState<'strategy' | 'soul' | 'history'>('strategy');
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteAgent(id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['agents'] });
+      navigate('/');
+    },
+    onError: (err) => {
+      setShowDeleteConfirm(false);
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete agent');
+    },
+  });
   const [authoringMode, setAuthoringMode] = useState<AuthoringMode>('deterministic');
   const [sourceTab, setSourceTab] = useState<DeterministicSource>('pine');
   const [strategyMd, setStrategyMd] = useState('');
@@ -198,17 +215,34 @@ export function AgentDetailPage() {
               </p>
             )}
           </div>
-          <Link
-            to={`/agents/${id}/backtest`}
-            className="rounded-lg bg-blue-600 px-4 py-2 text-white transition-colors hover:bg-blue-700"
-          >
-            Run Backtest
-          </Link>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowDeleteConfirm(true)}
+              className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
+            >
+              Delete Agent
+            </button>
+            <Link
+              to={`/agents/${id}/backtest`}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-white transition-colors hover:bg-blue-700"
+            >
+              Run Backtest
+            </Link>
+          </div>
         </div>
 
-        {error && (
+        <ConfirmDialog
+          open={showDeleteConfirm}
+          title="Delete Agent"
+          message="This will permanently delete this agent, all its strategy versions, soul versions, and run history. This cannot be undone."
+          onConfirm={() => deleteMutation.mutate()}
+          onCancel={() => setShowDeleteConfirm(false)}
+          isLoading={deleteMutation.isPending}
+        />
+
+        {(error || deleteError) && (
           <div className="rounded-lg border border-red-700 bg-red-900/50 p-3 text-sm text-red-300">
-            {error}
+            {error || deleteError}
           </div>
         )}
         {diagnostics.length > 0 && (

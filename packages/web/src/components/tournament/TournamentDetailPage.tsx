@@ -1,11 +1,12 @@
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Layout } from '../ui/Layout';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { api } from '../../lib/api-client';
 import { useTournament, useTournamentLeaderboard } from '../../hooks/useTournament';
 import { useTournamentSSE } from '../../hooks/useTournamentSSE';
 import { LeaderboardTable } from './LeaderboardTable';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
 interface TournamentEntry {
   id: string;
@@ -65,6 +66,24 @@ export function TournamentDetailPage() {
     mutationFn: () => api.cancelTournament(id!),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tournament', id] }),
   });
+
+  const navigate = useNavigate();
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteTournament(id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tournaments'] });
+      navigate('/tournaments');
+    },
+    onError: (err) => {
+      setShowDeleteConfirm(false);
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete tournament');
+    },
+  });
+
+  const canDelete = tournament?.status && tournament.status !== 'in_progress';
 
   if (isLoading) {
     return (
@@ -127,8 +146,31 @@ export function TournamentDetailPage() {
                 Compare Agents
               </Link>
             )}
+            {canDelete && (
+              <button
+                onClick={() => setShowDeleteConfirm(true)}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
+              >
+                Delete
+              </button>
+            )}
           </div>
         </div>
+
+        <ConfirmDialog
+          open={showDeleteConfirm}
+          title="Delete Tournament"
+          message="This will permanently delete this tournament and its leaderboard. Individual agent runs will be preserved. This cannot be undone."
+          onConfirm={() => deleteMutation.mutate()}
+          onCancel={() => setShowDeleteConfirm(false)}
+          isLoading={deleteMutation.isPending}
+        />
+
+        {deleteError && (
+          <div className="rounded-lg border border-red-700 bg-red-900/50 p-3 text-sm text-red-300">
+            {deleteError}
+          </div>
+        )}
 
         {/* Progress */}
         {isActive && (

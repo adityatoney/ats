@@ -4,8 +4,21 @@ import { db } from '../lib/db';
 import { runs, orders, fills, portfolioSnapshots, agentEvents, checkpoints } from '@aegis/db/schema';
 import { runManager } from '../services/run-manager';
 import { agentIsolation } from '../middleware/agent-isolation';
+import { deleteRun } from '../services/delete-service';
 
 export const runRoutes = new Hono();
+
+runRoutes.delete('/:id', async (c) => {
+  const id = c.req.param('id');
+  try {
+    await deleteRun(id);
+    return c.json({ data: { deleted: true } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Delete failed';
+    const status = message.includes('not found') ? 404 : message.includes('Cannot delete') ? 409 : 500;
+    return c.json({ error: { message, code: 'DELETE_FAILED' } }, status);
+  }
+});
 
 runRoutes.post('/', async (c) => {
   const body = await c.req.json();
