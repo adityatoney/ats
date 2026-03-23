@@ -9,17 +9,20 @@ import { api } from '../../lib/api-client';
 import { EquityCurve } from './EquityCurve';
 import { TradeLedger } from './TradeLedger';
 
+const EMPTY_ORDERS: Array<Record<string, unknown>> = [];
+const EMPTY_PORTFOLIO: Array<Record<string, unknown>> = [];
+
 export function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { data: run, isLoading, refetch } = useRun(id);
-  const { data: orders } = useRunOrders(id);
-  const { data: portfolio } = useRunPortfolio(id);
-  const { events: sseEvents, connected } = useSSE(id);
   const [activeTab, setActiveTab] = useState<'overview' | 'trades' | 'events' | 'branches'>(
     'overview',
   );
+  const { data: run, isLoading, refetch } = useRun(id);
+  const { data: orders } = useRunOrders(id, activeTab === 'overview' || activeTab === 'trades');
+  const { data: portfolio } = useRunPortfolio(id, activeTab === 'overview');
+  const { events: sseEvents, connected } = useSSE(id);
   const prevEventCount = useRef(0);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -53,13 +56,13 @@ export function RunDetailPage() {
     let invalidatePortfolio = false;
 
     for (const event of newEvents) {
-      if (
-        event.type === 'run.progress' ||
-        event.type === 'run.completed' ||
-        event.type === 'run.failed' ||
-        event.type === 'run.paused'
-      ) {
+      if (event.type === 'run.progress' || event.type === 'run.failed' || event.type === 'run.paused') {
         invalidateRun = true;
+      }
+      if (event.type === 'run.completed') {
+        // Terminal event: refresh everything once
+        invalidateRun = true;
+        invalidateOrders = true;
         invalidatePortfolio = true;
       }
       if (event.type === 'order.submitted' || event.type === 'order.filled') {
@@ -228,12 +231,12 @@ export function RunDetailPage() {
 
         {activeTab === 'overview' && (
           <EquityCurve
-            snapshots={(portfolio as Array<Record<string, unknown>>) || []}
-            orders={(orders as Array<Record<string, unknown>>) || []}
+            snapshots={(portfolio as Array<Record<string, unknown>>) ?? EMPTY_PORTFOLIO}
+            orders={(orders as Array<Record<string, unknown>>) ?? EMPTY_ORDERS}
           />
         )}
         {activeTab === 'trades' && (
-          <TradeLedger orders={(orders as Array<Record<string, unknown>>) || []} />
+          <TradeLedger orders={(orders as Array<Record<string, unknown>>) ?? EMPTY_ORDERS} />
         )}
         {activeTab === 'events' && (
           <div className="space-y-2">

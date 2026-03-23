@@ -85,8 +85,23 @@ runRoutes.get('/:id/orders', agentIsolation('run'), async (c) => {
 
 runRoutes.get('/:id/portfolio', agentIsolation('run'), async (c) => {
   const id = c.req.param('id');
+  const maxPoints = parseInt(c.req.query('maxPoints') || '500');
   const snapshots = await convex.query(api.portfolioSnapshots.listByRun, { runId: id as any });
-  return c.json({ data: normalizeAll(snapshots) });
+
+  // Downsample if we have more points than requested
+  let sampled = snapshots;
+  if (snapshots.length > maxPoints && maxPoints > 2) {
+    const step = (snapshots.length - 1) / (maxPoints - 1);
+    sampled = [];
+    for (let i = 0; i < maxPoints - 1; i++) {
+      sampled.push(snapshots[Math.round(i * step)]);
+    }
+    sampled.push(snapshots[snapshots.length - 1]); // always include last
+  }
+
+  // Strip positionsJson to reduce payload size (only needed for positions table, not chart)
+  const slim = normalizeAll(sampled).map(({ positionsJson, ...rest }) => rest);
+  return c.json({ data: slim });
 });
 
 runRoutes.get('/:id/checkpoints', async (c) => {

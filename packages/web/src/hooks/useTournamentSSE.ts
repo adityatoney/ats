@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
+const MAX_SSE_EVENTS = 200;
+
 export interface TournamentSSEEvent {
   type: string;
   data: Record<string, unknown>;
@@ -30,7 +32,10 @@ export function useTournamentSSE(tournamentId: string | undefined) {
     for (const eventType of eventTypes) {
       es.addEventListener(eventType, (e) => {
         const data = JSON.parse(e.data);
-        setEvents((prev) => [...prev, { type: eventType, data, tournamentId }]);
+        setEvents((prev) => {
+          const next = [...prev, { type: eventType, data, tournamentId }];
+          return next.length > MAX_SSE_EVENTS ? next.slice(-MAX_SSE_EVENTS) : next;
+        });
       });
     }
 

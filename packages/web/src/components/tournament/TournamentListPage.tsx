@@ -10,6 +10,7 @@ interface Tournament {
   agentCount: number;
   completedCount: number;
   createdAt: string;
+  _creationTime?: number;
 }
 
 export function TournamentListPage() {

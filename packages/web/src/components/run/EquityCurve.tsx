@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { createChart, type IChartApi, type SeriesMarker, type Time } from 'lightweight-charts';
+import { useEffect, useRef, useState, useMemo } from 'react';
+import { createChart, type IChartApi, type ISeriesApi, type SeriesMarker, type Time } from 'lightweight-charts';
 
 interface Props {
   snapshots: Array<Record<string, unknown>>;
@@ -180,7 +180,7 @@ export function EquityCurve({ snapshots, orders }: Props) {
   );
 }
 
-/** Main equity curve chart */
+/** Main equity curve chart — split into chart-creation and marker-update effects */
 function EquityChart({
   snapshots,
   orders,
@@ -194,12 +194,19 @@ function EquityChart({
 }) {
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstanceRef = useRef<IChartApi | null>(null);
+  const seriesRef = useRef<ISeriesApi<'Line'> | null>(null);
 
+  // Memoize the heavy data transformation
+  const equityData = useMemo(() => buildEquityData(snapshots), [snapshots]);
+
+  // Effect 1: Create/recreate chart when snapshot data changes
   useEffect(() => {
-    if (!chartRef.current || snapshots.length === 0) return;
+    if (!chartRef.current || equityData.length === 0) return;
 
     if (chartInstanceRef.current) {
       chartInstanceRef.current.remove();
+      chartInstanceRef.current = null;
+      seriesRef.current = null;
     }
 
     const chart = createChart(chartRef.current, {
@@ -213,36 +220,9 @@ function EquityChart({
     });
     chartInstanceRef.current = chart;
 
-    const equityData = buildEquityData(snapshots);
     const lineSeries = chart.addLineSeries({ color: '#3B82F6', lineWidth: 2 });
     lineSeries.setData(equityData as Array<{ time: string; value: number }>);
-
-    // Build markers for visible symbols, using order's own filledAtSim timestamp
-    if (orders && orders.length > 0) {
-      const markers = orders
-        .filter((o) => visibleSymbols.has(o.symbol as string))
-        .map((order) => {
-          const side = order.side as string;
-          const sym = order.symbol as string;
-          const time = getOrderTime(order);
-          if (!time) return null;
-
-          const symIdx = symbols.indexOf(sym);
-          const colors = getSymbolColors(sym, symIdx);
-
-          return {
-            time: time as Time,
-            position: side === 'buy' ? ('belowBar' as const) : ('aboveBar' as const),
-            color: side === 'buy' ? colors.buy : colors.sell,
-            shape: side === 'buy' ? ('arrowUp' as const) : ('arrowDown' as const),
-            text: `${side === 'buy' ? 'B' : 'S'} ${sym}`,
-          };
-        })
-        .filter((marker): marker is EquityMarker => marker !== null)
-        .sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
-
-      lineSeries.setMarkers(markers as SeriesMarker<Time>[]);
-    }
+    seriesRef.current = lineSeries;
 
     chart.timeScale().fitContent();
 
@@ -254,8 +234,44 @@ function EquityChart({
       window.removeEventListener('resize', handleResize);
       chart.remove();
       chartInstanceRef.current = null;
+      seriesRef.current = null;
     };
-  }, [snapshots, orders, symbols, visibleSymbols]);
+  }, [equityData]);
+
+  // Effect 2: Update markers only (no chart recreation) when orders/filters change
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+
+    if (!orders || orders.length === 0) {
+      series.setMarkers([]);
+      return;
+    }
+
+    const markers = orders
+      .filter((o) => visibleSymbols.has(o.symbol as string))
+      .map((order) => {
+        const side = order.side as string;
+        const sym = order.symbol as string;
+        const time = getOrderTime(order);
+        if (!time) return null;
+
+        const symIdx = symbols.indexOf(sym);
+        const colors = getSymbolColors(sym, symIdx);
+
+        return {
+          time: time as Time,
+          position: side === 'buy' ? ('belowBar' as const) : ('aboveBar' as const),
+          color: side === 'buy' ? colors.buy : colors.sell,
+          shape: side === 'buy' ? ('arrowUp' as const) : ('arrowDown' as const),
+          text: `${side === 'buy' ? 'B' : 'S'} ${sym}`,
+        };
+      })
+      .filter((marker): marker is EquityMarker => marker !== null)
+      .sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+
+    series.setMarkers(markers as SeriesMarker<Time>[]);
+  }, [orders, symbols, visibleSymbols]);
 
   return <div ref={chartRef} />;
 }

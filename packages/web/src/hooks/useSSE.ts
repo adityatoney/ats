@@ -1,9 +1,16 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
+const MAX_SSE_EVENTS = 200;
+
 export interface SSEEvent {
   type: string;
   data: Record<string, unknown>;
   runId: string;
+}
+
+function appendEvent(prev: SSEEvent[], event: SSEEvent): SSEEvent[] {
+  const next = [...prev, event];
+  return next.length > MAX_SSE_EVENTS ? next.slice(-MAX_SSE_EVENTS) : next;
 }
 
 export function useSSE(runId: string | undefined) {
@@ -19,45 +26,18 @@ export function useSSE(runId: string | undefined) {
 
     es.onopen = () => setConnected(true);
 
-    es.addEventListener('run.progress', (e) => {
-      const data = JSON.parse(e.data);
-      setEvents((prev) => [...prev, { type: 'run.progress', data, runId }]);
-    });
+    const eventTypes = [
+      'run.progress', 'run.completed', 'run.failed',
+      'order.submitted', 'order.filled', 'signal.generated',
+      'checkpoint.saved', 'soul.generated',
+    ];
 
-    es.addEventListener('run.completed', (e) => {
-      const data = JSON.parse(e.data);
-      setEvents((prev) => [...prev, { type: 'run.completed', data, runId }]);
-    });
-
-    es.addEventListener('run.failed', (e) => {
-      const data = JSON.parse(e.data);
-      setEvents((prev) => [...prev, { type: 'run.failed', data, runId }]);
-    });
-
-    es.addEventListener('order.submitted', (e) => {
-      const data = JSON.parse(e.data);
-      setEvents((prev) => [...prev, { type: 'order.submitted', data, runId }]);
-    });
-
-    es.addEventListener('order.filled', (e) => {
-      const data = JSON.parse(e.data);
-      setEvents((prev) => [...prev, { type: 'order.filled', data, runId }]);
-    });
-
-    es.addEventListener('signal.generated', (e) => {
-      const data = JSON.parse(e.data);
-      setEvents((prev) => [...prev, { type: 'signal.generated', data, runId }]);
-    });
-
-    es.addEventListener('checkpoint.saved', (e) => {
-      const data = JSON.parse(e.data);
-      setEvents((prev) => [...prev, { type: 'checkpoint.saved', data, runId }]);
-    });
-
-    es.addEventListener('soul.generated', (e) => {
-      const data = JSON.parse(e.data);
-      setEvents((prev) => [...prev, { type: 'soul.generated', data, runId }]);
-    });
+    for (const eventType of eventTypes) {
+      es.addEventListener(eventType, (e) => {
+        const data = JSON.parse(e.data);
+        setEvents((prev) => appendEvent(prev, { type: eventType, data, runId }));
+      });
+    }
 
     es.onerror = () => {
       setConnected(false);

@@ -6,11 +6,6 @@ export function useTournament(id: string | undefined) {
     queryKey: ['tournament', id],
     queryFn: () => api.getTournament(id!),
     enabled: !!id,
-    refetchInterval: (query) => {
-      const data = query.state.data as Record<string, unknown> | undefined;
-      const status = data?.status as string;
-      return status === 'in_progress' || status === 'pending' ? 2000 : false;
-    },
   });
 }
 
