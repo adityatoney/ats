@@ -43,13 +43,15 @@ export const handleOrderFilled = mutation({
     filledAtSim: v.optional(v.float64()),
   },
   handler: async (ctx, args) => {
-    // Find pending order
-    const orders = await ctx.db
+    // Find pending order using compound index
+    const pendingOrders = await ctx.db
       .query("orders")
-      .withIndex("by_runId", (q) => q.eq("runId", args.runId))
+      .withIndex("by_runId_status", (q) =>
+        q.eq("runId", args.runId).eq("status", "pending")
+      )
       .collect();
-    const pendingOrder = orders.find(
-      (o) => o.symbol === args.symbol && o.side === args.side && o.status === "pending"
+    const pendingOrder = pendingOrders.find(
+      (o) => o.symbol === args.symbol && o.side === args.side
     );
 
     let orderId;
@@ -295,15 +297,8 @@ export const processBatch = mutation({
       const runId = event.runId as Id<"runs">;
       const p = event.payload as Record<string, any>;
 
-      // Log to agentEvents (skip signal.generated — high volume, low persistence value)
-      if (event.eventType !== "signal.generated") {
-        await ctx.db.insert("agentEvents", {
-          pgId: "",
-          runId,
-          eventType: event.eventType,
-          payload: event.payload,
-        });
-      }
+      // agentEvents are NOT logged per-event here — they're bulk-inserted
+      // after run completion via bulkInsertAgentEvents to reduce write volume.
 
       switch (event.eventType) {
         case "run.started": {
@@ -329,16 +324,17 @@ export const processBatch = mutation({
         }
 
         case "order.filled": {
-          // Find pending order for this run/symbol/side
-          const orders = await ctx.db
+          // Find pending order using compound index — only reads pending orders, not all
+          const pendingOrders = await ctx.db
             .query("orders")
-            .withIndex("by_runId", (q) => q.eq("runId", runId))
+            .withIndex("by_runId_status", (q) =>
+              q.eq("runId", runId).eq("status", "pending")
+            )
             .collect();
-          const pendingOrder = orders.find(
+          const pendingOrder = pendingOrders.find(
             (o) =>
               o.symbol === p.symbol &&
-              o.side === p.side &&
-              o.status === "pending"
+              o.side === p.side
           );
 
           let orderId: Id<"orders">;
@@ -508,16 +504,46 @@ export const processBatch = mutation({
       }
     }
 
-    // Apply deduplicated progress patches — one patch per run
+    // Apply deduplicated progress patches — only every 500 bars or on last bar.
+    // Frontend reads progress from SSE, not DB. DB value is only for crash recovery.
     for (const [runIdStr, progress] of latestProgressByRun) {
-      const runId = runIdStr as Id<"runs">;
-      await ctx.db.patch(runId, {
-        status: "running",
-        processedBars: progress.processedBars,
-        totalBars: progress.totalBars,
-      });
+      const isLastBar = progress.totalBars > 0 && progress.processedBars >= progress.totalBars;
+      const isCheckpoint = progress.processedBars % 500 === 0;
+      if (isLastBar || isCheckpoint) {
+        const runId = runIdStr as Id<"runs">;
+        await ctx.db.patch(runId, {
+          status: "running",
+          processedBars: progress.processedBars,
+          totalBars: progress.totalBars,
+        });
+      }
     }
 
     return results;
+  },
+});
+
+// Bulk-insert agent events after run completion.
+// Called once per run instead of per-event — reduces write volume by ~50%.
+// Convex transactions handle up to ~100 inserts comfortably; batch to 100 from Node side.
+export const bulkInsertAgentEvents = mutation({
+  args: {
+    events: v.array(
+      v.object({
+        runId: v.string(),
+        eventType: v.string(),
+        payload: v.any(),
+      })
+    ),
+  },
+  handler: async (ctx, args) => {
+    for (const event of args.events) {
+      await ctx.db.insert("agentEvents", {
+        pgId: "",
+        runId: event.runId as Id<"runs">,
+        eventType: event.eventType,
+        payload: event.payload,
+      });
+    }
   },
 });

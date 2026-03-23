@@ -30,6 +30,7 @@ export function useSSE(runId: string | undefined) {
 
     const eventTypes = [
       'run.started', 'run.progress', 'run.completed', 'run.failed', 'run.paused',
+      'run.saved',
       'order.submitted', 'order.filled',
       'signal.generated', 'checkpoint.saved', 'soul.generated',
     ];

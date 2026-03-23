@@ -41,6 +41,12 @@ export function RunDetailPage() {
   // Live metrics from SSE run.completed — show immediately without waiting for DB
   const [liveMetrics, setLiveMetrics] = useState<Record<string, number> | null>(null);
 
+  // Live status from SSE — overrides DB status so UI reacts before DB write
+  const [liveStatus, setLiveStatus] = useState<string | null>(null);
+
+  // Saving indicator — true between run.completed and run.saved SSE events
+  const [savingToDb, setSavingToDb] = useState(false);
+
   // Throttled invalidation refs
   const lastInvalidateTime = useRef(0);
   const pendingInvalidations = useRef({ run: false, orders: false, portfolio: false });
@@ -93,6 +99,9 @@ export function RunDetailPage() {
         if (data.metrics) {
           setLiveMetrics(data.metrics as Record<string, number>);
         }
+        // Update status immediately from SSE — don't wait for DB write
+        setLiveStatus(event.type === 'run.completed' ? 'completed' : 'failed');
+        setSavingToDb(true); // Show saving indicator — clears on run.saved
         setLiveProgress(null);
         liveSnapshotsRef.current.clear();
         liveOrdersRef.current = [];
@@ -108,7 +117,18 @@ export function RunDetailPage() {
         return;
       }
 
+      if (event.type === 'run.saved') {
+        // DB write complete — clear saving indicator + live overrides, refresh from DB
+        setSavingToDb(false);
+        setLiveStatus(null);
+        setLiveMetrics(null);
+        queryClient.invalidateQueries({ queryKey: ['run', id] });
+        queryClient.invalidateQueries({ queryKey: ['run-events', id] });
+        return;
+      }
+
       if (event.type === 'run.started') {
+        setLiveStatus('running');
         pendingInvalidations.current.run = true;
       }
 
@@ -259,7 +279,7 @@ export function RunDetailPage() {
       </Layout>
     );
 
-  const status = runData.status as string;
+  const status = liveStatus ?? (runData.status as string);
   // Use live SSE progress if available, fall back to DB data
   const processedBars = liveProgress?.processedBars ?? ((runData.processedBars as number) || 0);
   const totalBars = liveProgress?.totalBars ?? ((runData.totalBars as number) || 0);
@@ -354,6 +374,17 @@ export function RunDetailPage() {
                 style={{ width: `${progress}%` }}
               />
             </div>
+          </div>
+        )}
+
+        {/* Saving indicator — only shows during live transition, not on page refresh
+            (on refresh, DB already has terminal status so this condition is false) */}
+        {savingToDb && status !== 'completed' && status !== 'failed' && (
+          <div className="bg-gray-900 rounded-lg p-3 border border-gray-800 flex items-center gap-3">
+            <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+            <span className="text-sm text-gray-400">
+              Saving run data to database...
+            </span>
           </div>
         )}
 

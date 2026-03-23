@@ -1,5 +1,6 @@
 import { convex } from '../lib/convex';
 import { api } from '../../../../convex/_generated/api';
+import { eventBus } from './event-bus';
 
 interface QueuedEvent {
   runId: string;
@@ -7,8 +8,9 @@ interface QueuedEvent {
   payload: Record<string, unknown>;
 }
 
-const MAX_BATCH_SIZE = 25;
+const MAX_BATCH_SIZE = 100;
 const FLUSH_INTERVAL_MS = 200;
+const AGENT_EVENTS_BATCH_SIZE = 2000; // Convex supports up to 16k writes/txn — 2000 is safe with headroom
 
 const PRIORITY_EVENTS = new Set([
   'run.completed',
@@ -24,8 +26,19 @@ class WriteQueue {
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
 
+  // Per-run event log — accumulated during run, bulk-written on completion
+  private eventLogs = new Map<string, QueuedEvent[]>();
+
   enqueue(event: QueuedEvent): void {
     this.buffer.push(event);
+
+    // Accumulate event for deferred agentEvents write (skip signal.generated)
+    if (event.eventType !== 'signal.generated') {
+      if (!this.eventLogs.has(event.runId)) {
+        this.eventLogs.set(event.runId, []);
+      }
+      this.eventLogs.get(event.runId)!.push(event);
+    }
 
     if (PRIORITY_EVENTS.has(event.eventType)) {
       this.flush();
@@ -64,23 +77,24 @@ class WriteQueue {
         }
       );
 
-      // Handle tournament callbacks for terminal events
+      // Handle terminal events — tournament callbacks + deferred agentEvents bulk write
       if (results && Array.isArray(results)) {
         for (const result of results) {
-          if (result.tournamentId) {
+          const matchingEvent = batch.find((e) => e.eventType === result.eventType);
+          const runId = matchingEvent?.runId;
+
+          if (result.tournamentId && runId) {
             const { tournamentManager } = await import('./tournament-manager');
             if (result.eventType === 'run.completed') {
-              await tournamentManager.handleRunCompleted(
-                // Find the matching runId from the batch
-                batch.find((e) => e.eventType === 'run.completed')!.runId,
-                result.tournamentId
-              );
+              await tournamentManager.handleRunCompleted(runId, result.tournamentId);
             } else if (result.eventType === 'run.failed') {
-              await tournamentManager.handleRunFailed(
-                batch.find((e) => e.eventType === 'run.failed')!.runId,
-                result.tournamentId
-              );
+              await tournamentManager.handleRunFailed(runId, result.tournamentId);
             }
+          }
+
+          // Bulk-write accumulated agentEvents for this run (fire-and-forget from browser perspective)
+          if (runId && (result.eventType === 'run.completed' || result.eventType === 'run.failed')) {
+            this.bulkWriteAgentEvents(runId);
           }
         }
       }
@@ -95,6 +109,43 @@ class WriteQueue {
         this.flush();
       }
     }
+  }
+
+  /**
+   * Bulk-insert all accumulated agentEvents for a completed run.
+   * Runs async — once the HTTP request reaches Convex, the transaction
+   * completes server-side regardless of client/browser state.
+   */
+  private bulkWriteAgentEvents(runId: string): void {
+    const events = this.eventLogs.get(runId);
+    this.eventLogs.delete(runId);
+
+    // Notify frontend immediately — don't make user wait for historical log writes
+    eventBus.publish({ runId, eventType: 'run.saved', payload: {} });
+
+    if (!events || events.length === 0) return;
+
+    // Fire-and-forget: write in background, log result
+    console.log(`Bulk writing ${events.length} agentEvents for run ${runId} (background)`);
+
+    const chunks: QueuedEvent[][] = [];
+    for (let i = 0; i < events.length; i += AGENT_EVENTS_BATCH_SIZE) {
+      chunks.push(events.slice(i, i + AGENT_EVENTS_BATCH_SIZE));
+    }
+
+    Promise.all(
+      chunks.map((chunk) =>
+        convex.mutation(api.webhookHandlers.bulkInsertAgentEvents, {
+          events: chunk.map((e) => ({
+            runId: e.runId,
+            eventType: e.eventType,
+            payload: e.payload,
+          })),
+        })
+      )
+    )
+      .then(() => console.log(`Saved ${events.length} agentEvents for run ${runId} (${chunks.length} chunks)`))
+      .catch((err) => console.error(`Failed to bulk-write agentEvents for run ${runId}:`, err));
   }
 }
 

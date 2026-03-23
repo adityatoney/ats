@@ -91,7 +91,8 @@ export default defineSchema({
     barIndex: v.float64(),
   })
     .index("by_pgId", ["pgId"])
-    .index("by_runId", ["runId"]),
+    .index("by_runId", ["runId"])
+    .index("by_runId_status", ["runId", "status"]),
 
   fills: defineTable({
     pgId: v.string(),
