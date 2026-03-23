@@ -1,19 +1,16 @@
 import logging
-import os
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
+from aegis_runtime.api.routes.runs import event_sender
 from aegis_runtime.data.data_loader import DataLoader
 from aegis_runtime.tournament.coordinator import TournamentCoordinator
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 data_router = APIRouter()
-
-NODE_SERVER_URL = os.getenv("NODE_SERVER_URL", "http://localhost:3001")
 
 
 class RunConfig(BaseModel):
@@ -38,22 +35,6 @@ class PrefetchDataRequest(BaseModel):
     timeframe: str = "1Day"
 
 
-async def send_event(run_id: str, event_type: str, payload: dict[str, Any]):
-    try:
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"{NODE_SERVER_URL}/api/webhooks/runtime-event",
-                json={
-                    "runId": run_id,
-                    "eventType": event_type,
-                    "payload": payload,
-                },
-                timeout=10.0,
-            )
-    except Exception as e:
-        logger.error(f"Failed to send event {event_type} for run {run_id}: {e}")
-
-
 async def run_tournament_task(request: StartTournamentRequest):
     try:
         # Load data once for all agents
@@ -66,7 +47,7 @@ async def run_tournament_task(request: StartTournamentRequest):
         loader = DataLoader()
         shared_data = loader.load(symbols, start_date, end_date, timeframe)
 
-        coordinator = TournamentCoordinator(event_callback=send_event)
+        coordinator = TournamentCoordinator(event_callback=event_sender.send)
         runs_config = [r.model_dump() for r in request.runs]
 
         await coordinator.run_tournament(
@@ -77,6 +58,8 @@ async def run_tournament_task(request: StartTournamentRequest):
 
     except Exception as e:
         logger.exception(f"Tournament {request.tournamentId} failed: {e}")
+    finally:
+        await event_sender.flush()
 
 
 @router.post("/start")

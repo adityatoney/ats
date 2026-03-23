@@ -6,12 +6,7 @@ export function useRun(runId: string | undefined) {
     queryKey: ['run', runId],
     queryFn: () => api.getRun(runId!),
     enabled: !!runId,
-    refetchInterval: (query) => {
-      const data = query.state.data as Record<string, unknown> | undefined;
-      const status = data?.status;
-      if (status === 'running' || status === 'pending') return 2000;
-      return false;
-    },
+    // No polling — SSE-driven invalidation handles live updates
   });
 }
 
@@ -20,13 +15,6 @@ export function useRunOrders(runId: string | undefined) {
     queryKey: ['run-orders', runId],
     queryFn: () => api.getRunOrders(runId!),
     enabled: !!runId,
-    refetchInterval: (query) => {
-      // Self-manage polling: check the run status from the run query
-      const data = query.state.data as Array<Record<string, unknown>> | undefined;
-      // Keep polling if data is still empty or actively running
-      // SSE invalidation handles the rest
-      return false;
-    },
   });
 }
 

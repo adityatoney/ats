@@ -1,5 +1,6 @@
 import { mutation } from "./_generated/server";
 import { v } from "convex/values";
+import { Id } from "./_generated/dataModel";
 
 // Handle order.submitted event
 export const handleOrderSubmitted = mutation({
@@ -262,5 +263,261 @@ export const logAgentEvent = mutation({
       timestampSimulated: args.timestampSimulated,
       barIndex: args.barIndex,
     });
+  },
+});
+
+// Batch process multiple events in a single transaction.
+// Called by the Node server write queue — up to 25 events per call.
+export const processBatch = mutation({
+  args: {
+    events: v.array(
+      v.object({
+        runId: v.string(),
+        eventType: v.string(),
+        payload: v.any(),
+      })
+    ),
+  },
+  handler: async (ctx, args) => {
+    const results: Array<{
+      tournamentId?: string;
+      agentId?: string;
+      eventType: string;
+    }> = [];
+
+    // Track latest progress per run to avoid redundant patches
+    const latestProgressByRun = new Map<
+      string,
+      { processedBars: number; totalBars: number }
+    >();
+
+    for (const event of args.events) {
+      const runId = event.runId as Id<"runs">;
+      const p = event.payload as Record<string, any>;
+
+      // Log to agentEvents (skip signal.generated — high volume, low persistence value)
+      if (event.eventType !== "signal.generated") {
+        await ctx.db.insert("agentEvents", {
+          pgId: "",
+          runId,
+          eventType: event.eventType,
+          payload: event.payload,
+        });
+      }
+
+      switch (event.eventType) {
+        case "run.started": {
+          await ctx.db.patch(runId, { status: "running" });
+          break;
+        }
+
+        case "order.submitted": {
+          await ctx.db.insert("orders", {
+            pgId: "",
+            runId,
+            symbol: p.symbol,
+            side: p.side,
+            orderType: p.order_type,
+            quantity: p.quantity,
+            status: "pending",
+            barIndex: p.bar_index ?? 0,
+            submittedAtSim: p.timestamp
+              ? new Date(p.timestamp).getTime()
+              : undefined,
+          });
+          break;
+        }
+
+        case "order.filled": {
+          // Find pending order for this run/symbol/side
+          const orders = await ctx.db
+            .query("orders")
+            .withIndex("by_runId", (q) => q.eq("runId", runId))
+            .collect();
+          const pendingOrder = orders.find(
+            (o) =>
+              o.symbol === p.symbol &&
+              o.side === p.side &&
+              o.status === "pending"
+          );
+
+          let orderId: Id<"orders">;
+          const filledAtSim = p.timestamp
+            ? new Date(p.timestamp).getTime()
+            : undefined;
+
+          if (pendingOrder) {
+            await ctx.db.patch(pendingOrder._id, {
+              status: "filled",
+              barIndex: p.bar_index ?? 0,
+              filledAtSim,
+            });
+            orderId = pendingOrder._id;
+          } else {
+            orderId = await ctx.db.insert("orders", {
+              pgId: "",
+              runId,
+              symbol: p.symbol,
+              side: p.side,
+              orderType: p.order_type,
+              quantity: p.quantity,
+              status: "filled",
+              barIndex: p.bar_index ?? 0,
+              submittedAtSim: filledAtSim,
+              filledAtSim,
+            });
+          }
+
+          await ctx.db.insert("fills", {
+            pgId: "",
+            orderId,
+            runId,
+            fillPrice: p.fill_price,
+            fillQuantity: p.quantity,
+            fee: p.fee ?? 0,
+            slippage: p.slippage ?? 0,
+            filledAtSim,
+          });
+          break;
+        }
+
+        case "run.progress": {
+          // Insert every portfolio snapshot
+          if (p.barIndex !== undefined) {
+            await ctx.db.insert("portfolioSnapshots", {
+              pgId: "",
+              runId,
+              barIndex: p.barIndex,
+              timestampSimulated: p.timestampSimulated
+                ? new Date(p.timestampSimulated).getTime()
+                : undefined,
+              cash: p.cash ?? 0,
+              equity: p.equity ?? 0,
+              positionsJson: p.positionsJson ?? {},
+              drawdown: p.drawdown ?? 0,
+              highWaterMark: p.highWaterMark ?? 0,
+            });
+          }
+          // Only keep latest progress values — patched once after loop
+          latestProgressByRun.set(event.runId, {
+            processedBars: p.processedBars ?? 0,
+            totalBars: p.totalBars ?? 0,
+          });
+          break;
+        }
+
+        case "checkpoint.saved": {
+          await ctx.db.insert("checkpoints", {
+            pgId: "",
+            runId,
+            barIndex: p.barIndex ?? 0,
+            stateBlob: p.state ?? {},
+          });
+          break;
+        }
+
+        case "run.completed": {
+          const run = await ctx.db.get(runId);
+          if (run) {
+            await ctx.db.patch(runId, {
+              status: "completed",
+              metricsJson: p.metrics ?? undefined,
+              processedBars: p.processedBars ?? 0,
+              completedAt: Date.now(),
+            });
+            await ctx.db.patch(run.agentId, {
+              status: "idle",
+              updatedAt: Date.now(),
+            });
+            // Remove from progress map — no need to patch run again
+            latestProgressByRun.delete(event.runId);
+            results.push({
+              tournamentId: run.tournamentId as string | undefined,
+              agentId: run.agentId as string,
+              eventType: "run.completed",
+            });
+          }
+          break;
+        }
+
+        case "run.failed": {
+          const failedRun = await ctx.db.get(runId);
+          if (failedRun) {
+            await ctx.db.patch(runId, {
+              status: "failed",
+              errorMessage: p.error ?? "Unknown error",
+              completedAt: Date.now(),
+            });
+            await ctx.db.patch(failedRun.agentId, {
+              status: "idle",
+              updatedAt: Date.now(),
+            });
+            latestProgressByRun.delete(event.runId);
+            results.push({
+              tournamentId: failedRun.tournamentId as string | undefined,
+              agentId: failedRun.agentId as string,
+              eventType: "run.failed",
+            });
+          }
+          break;
+        }
+
+        case "soul.generated": {
+          if (p.soulMd && p.soulJson) {
+            const soulRun = await ctx.db.get(runId);
+            if (soulRun) {
+              const souls = await ctx.db
+                .query("soulVersions")
+                .withIndex("by_agentId_version", (q) =>
+                  q.eq("agentId", soulRun.agentId)
+                )
+                .collect();
+              const latestVersion =
+                souls.length > 0
+                  ? Math.max(...souls.map((s) => s.version))
+                  : 0;
+              await ctx.db.insert("soulVersions", {
+                pgId: "",
+                agentId: soulRun.agentId,
+                version: latestVersion + 1,
+                soulMd: p.soulMd,
+                soulJson: p.soulJson,
+                status: "pending",
+                derivedFromRunId: runId,
+              });
+            }
+          }
+          break;
+        }
+
+        case "branch.completed": {
+          if (p.resultDelta) {
+            const branches = await ctx.db
+              .query("branches")
+              .withIndex("by_runId", (q) => q.eq("runId", runId))
+              .collect();
+            for (const branch of branches) {
+              await ctx.db.patch(branch._id, {
+                resultDeltaJson: p.resultDelta,
+                status: "completed",
+              });
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    // Apply deduplicated progress patches — one patch per run
+    for (const [runIdStr, progress] of latestProgressByRun) {
+      const runId = runIdStr as Id<"runs">;
+      await ctx.db.patch(runId, {
+        status: "running",
+        processedBars: progress.processedBars,
+        totalBars: progress.totalBars,
+      });
+    }
+
+    return results;
   },
 });

@@ -1,5 +1,5 @@
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Layout } from '../ui/Layout';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -16,13 +16,48 @@ export function RunDetailPage() {
   const { data: run, isLoading, refetch } = useRun(id);
   const { data: orders } = useRunOrders(id);
   const { data: portfolio } = useRunPortfolio(id);
-  const { events: sseEvents, connected } = useSSE(id);
+  const { events: sseEvents, connected, totalReceived } = useSSE(id);
   const [activeTab, setActiveTab] = useState<'overview' | 'trades' | 'events' | 'branches'>(
     'overview',
   );
-  const prevEventCount = useRef(0);
+  const prevTotalReceived = useRef(0);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Live progress from SSE — avoids DB refetch for progress bar
+  const [liveProgress, setLiveProgress] = useState<{
+    processedBars: number;
+    totalBars: number;
+  } | null>(null);
+
+  // Live snapshots from SSE — feeds chart in real-time without waiting for DB
+  const liveSnapshotsRef = useRef<Map<number, Record<string, unknown>>>(new Map());
+  const [liveSnapshotVersion, setLiveSnapshotVersion] = useState(0);
+  const chartRenderTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Live orders from SSE — markers appear immediately
+  const liveOrdersRef = useRef<Array<Record<string, unknown>>>([]);
+
+  // Live metrics from SSE run.completed — show immediately without waiting for DB
+  const [liveMetrics, setLiveMetrics] = useState<Record<string, number> | null>(null);
+
+  // Throttled invalidation refs
+  const lastInvalidateTime = useRef(0);
+  const pendingInvalidations = useRef({ run: false, orders: false, portfolio: false });
+  const throttleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushInvalidations = useCallback(() => {
+    const p = pendingInvalidations.current;
+    if (p.run) queryClient.invalidateQueries({ queryKey: ['run', id] });
+    if (p.orders) queryClient.invalidateQueries({ queryKey: ['run-orders', id] });
+    if (p.portfolio) queryClient.invalidateQueries({ queryKey: ['run-portfolio', id] });
+    pendingInvalidations.current = { run: false, orders: false, portfolio: false };
+    lastInvalidateTime.current = Date.now();
+    if (throttleTimer.current) {
+      clearTimeout(throttleTimer.current);
+      throttleTimer.current = null;
+    }
+  }, [queryClient, id]);
 
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteRun(id!),
@@ -42,35 +77,114 @@ export function RunDetailPage() {
     },
   });
 
-  // SSE-driven query invalidation: when new events arrive, refetch relevant data
+  // SSE-driven query invalidation — throttled to at most 1/sec
   useEffect(() => {
-    if (sseEvents.length <= prevEventCount.current) return;
-    const newEvents = sseEvents.slice(prevEventCount.current);
-    prevEventCount.current = sseEvents.length;
-
-    let invalidateRun = false;
-    let invalidateOrders = false;
-    let invalidatePortfolio = false;
+    if (totalReceived <= prevTotalReceived.current) return;
+    // Compute how many new events arrived; pull from the tail of the (capped) array
+    const numNew = Math.min(totalReceived - prevTotalReceived.current, sseEvents.length);
+    const newEvents = sseEvents.slice(sseEvents.length - numNew);
+    prevTotalReceived.current = totalReceived;
 
     for (const event of newEvents) {
-      if (
-        event.type === 'run.progress' ||
-        event.type === 'run.completed' ||
-        event.type === 'run.failed' ||
-        event.type === 'run.paused'
-      ) {
-        invalidateRun = true;
-        invalidatePortfolio = true;
+      // Terminal events: invalidate everything immediately, no throttle
+      if (event.type === 'run.completed' || event.type === 'run.failed') {
+        // Show metrics immediately from SSE — don't wait for DB
+        const data = event.data as Record<string, unknown>;
+        if (data.metrics) {
+          setLiveMetrics(data.metrics as Record<string, number>);
+        }
+        setLiveProgress(null);
+        liveSnapshotsRef.current.clear();
+        liveOrdersRef.current = [];
+        if (chartRenderTimer.current) {
+          clearTimeout(chartRenderTimer.current);
+          chartRenderTimer.current = null;
+        }
+        setLiveSnapshotVersion((v) => v + 1);
+        queryClient.invalidateQueries({ queryKey: ['run', id] });
+        queryClient.invalidateQueries({ queryKey: ['run-orders', id] });
+        queryClient.invalidateQueries({ queryKey: ['run-portfolio', id] });
+        pendingInvalidations.current = { run: false, orders: false, portfolio: false };
+        return;
       }
-      if (event.type === 'order.submitted' || event.type === 'order.filled') {
-        invalidateOrders = true;
+
+      if (event.type === 'run.started') {
+        pendingInvalidations.current.run = true;
+      }
+
+      if (event.type === 'run.progress') {
+        const data = event.data as Record<string, unknown>;
+        // Update progress bar directly from SSE (lightweight — always immediate)
+        setLiveProgress({
+          processedBars: (data.processedBars as number) ?? 0,
+          totalBars: (data.totalBars as number) ?? 0,
+        });
+        // Accumulate snapshot — chart render is throttled below
+        const barIndex = data.barIndex as number | undefined;
+        if (barIndex !== undefined) {
+          liveSnapshotsRef.current.set(barIndex, {
+            barIndex,
+            timestampSimulated: data.timestampSimulated,
+            cash: data.cash ?? 0,
+            equity: data.equity ?? 0,
+            positionsJson: data.positionsJson ?? {},
+            drawdown: data.drawdown ?? 0,
+            highWaterMark: data.highWaterMark ?? 0,
+          });
+        }
+        pendingInvalidations.current.portfolio = true;
+      }
+
+      if (event.type === 'run.paused') {
+        pendingInvalidations.current.run = true;
+      }
+
+      if (event.type === 'order.filled') {
+        // Accumulate live order for immediate marker rendering
+        const data = event.data as Record<string, unknown>;
+        liveOrdersRef.current.push({
+          symbol: data.symbol,
+          side: data.side,
+          orderType: data.order_type,
+          quantity: data.quantity,
+          status: 'filled',
+          fillPrice: data.fill_price,
+          filledAtSim: data.timestamp ? new Date(data.timestamp as string).getTime() : undefined,
+          submittedAtSim: data.timestamp ? new Date(data.timestamp as string).getTime() : undefined,
+        });
+        pendingInvalidations.current.orders = true;
+      }
+
+      if (event.type === 'order.submitted') {
+        pendingInvalidations.current.orders = true;
       }
     }
 
-    if (invalidateRun) queryClient.invalidateQueries({ queryKey: ['run', id] });
-    if (invalidateOrders) queryClient.invalidateQueries({ queryKey: ['run-orders', id] });
-    if (invalidatePortfolio) queryClient.invalidateQueries({ queryKey: ['run-portfolio', id] });
-  }, [sseEvents.length, id, queryClient]);
+    // Throttle chart re-renders to ~10fps (100ms) — batch multiple SSE events
+    if (!chartRenderTimer.current && liveSnapshotsRef.current.size > 0) {
+      chartRenderTimer.current = setTimeout(() => {
+        chartRenderTimer.current = null;
+        setLiveSnapshotVersion((v) => v + 1);
+      }, 100);
+    }
+
+    // Throttle: flush at most once per second
+    const now = Date.now();
+    const elapsed = now - lastInvalidateTime.current;
+    if (elapsed >= 1000) {
+      flushInvalidations();
+    } else if (!throttleTimer.current) {
+      throttleTimer.current = setTimeout(flushInvalidations, 1000 - elapsed);
+    }
+  }, [totalReceived, sseEvents, id, queryClient, flushInvalidations]);
+
+  // Cleanup timers on unmount
+  useEffect(() => {
+    return () => {
+      if (throttleTimer.current) clearTimeout(throttleTimer.current);
+      if (chartRenderTimer.current) clearTimeout(chartRenderTimer.current);
+    };
+  }, []);
 
   // Load historical events from DB
   const { data: dbEvents } = useQuery({
@@ -93,8 +207,44 @@ export function RunDetailPage() {
     enabled: !!id && activeTab === 'branches',
   });
 
+  // Merge DB portfolio with live SSE snapshots for real-time chart
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  void liveSnapshotVersion; // dependency — triggers re-render when chart timer fires
+  const mergedSnapshots = (() => {
+    const dbSnaps = (portfolio as Array<Record<string, unknown>>) || [];
+    if (liveSnapshotsRef.current.size === 0) return dbSnaps;
+    // Fast path: find max barIndex in DB, take only live snapshots beyond it
+    const maxDbBar = dbSnaps.length > 0
+      ? Math.max(...dbSnaps.map((s) => (s.barIndex as number) ?? 0))
+      : -1;
+    const liveOnly: Record<string, unknown>[] = [];
+    for (const snap of liveSnapshotsRef.current.values()) {
+      if ((snap.barIndex as number) > maxDbBar) liveOnly.push(snap);
+    }
+    if (liveOnly.length === 0) return dbSnaps;
+    // Live snapshots are inserted in order, just sort the tail
+    liveOnly.sort((a, b) => (a.barIndex as number) - (b.barIndex as number));
+    return [...dbSnaps, ...liveOnly];
+  })();
+
+  // Merge DB orders with live SSE orders for immediate markers
+  const mergedOrders = (() => {
+    const dbOrders = (orders as Array<Record<string, unknown>>) || [];
+    if (liveOrdersRef.current.length === 0) return dbOrders;
+    // Find max filledAtSim in DB orders to avoid duplicates
+    const dbTimestamps = new Set(
+      dbOrders.map((o) => `${o.symbol}-${o.side}-${o.filledAtSim}`),
+    );
+    const liveOnly = liveOrdersRef.current.filter(
+      (o) => !dbTimestamps.has(`${o.symbol}-${o.side}-${o.filledAtSim}`),
+    );
+    if (liveOnly.length === 0) return dbOrders;
+    return [...dbOrders, ...liveOnly];
+  })();
+
   const runData = run as Record<string, unknown> | undefined;
-  const metrics = runData?.metricsJson as Record<string, number> | null;
+  // Use live metrics (from SSE) if available, fall back to DB
+  const metrics = liveMetrics ?? (runData?.metricsJson as Record<string, number> | null);
 
   if (isLoading)
     return (
@@ -110,8 +260,9 @@ export function RunDetailPage() {
     );
 
   const status = runData.status as string;
-  const processedBars = (runData.processedBars as number) || 0;
-  const totalBars = (runData.totalBars as number) || 0;
+  // Use live SSE progress if available, fall back to DB data
+  const processedBars = liveProgress?.processedBars ?? ((runData.processedBars as number) || 0);
+  const totalBars = liveProgress?.totalBars ?? ((runData.totalBars as number) || 0);
   const progress = totalBars > 0 ? (processedBars / totalBars) * 100 : 0;
 
   // Merge SSE events with DB events for the events tab
@@ -228,8 +379,8 @@ export function RunDetailPage() {
 
         {activeTab === 'overview' && (
           <EquityCurve
-            snapshots={(portfolio as Array<Record<string, unknown>>) || []}
-            orders={(orders as Array<Record<string, unknown>>) || []}
+            snapshots={mergedSnapshots}
+            orders={mergedOrders}
           />
         )}
         {activeTab === 'trades' && (

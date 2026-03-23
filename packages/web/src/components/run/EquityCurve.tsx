@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { createChart, type IChartApi, type SeriesMarker, type Time } from 'lightweight-charts';
+import { useEffect, useRef, useState, useMemo } from 'react';
+import { createChart, type IChartApi, type ISeriesApi, type SeriesMarker, type Time } from 'lightweight-charts';
 
 interface Props {
   snapshots: Array<Record<string, unknown>>;
@@ -180,7 +180,7 @@ export function EquityCurve({ snapshots, orders }: Props) {
   );
 }
 
-/** Main equity curve chart */
+/** Main equity curve chart — creates chart once, updates data incrementally */
 function EquityChart({
   snapshots,
   orders,
@@ -194,13 +194,11 @@ function EquityChart({
 }) {
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstanceRef = useRef<IChartApi | null>(null);
+  const lineSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
 
+  // Create chart once on mount
   useEffect(() => {
-    if (!chartRef.current || snapshots.length === 0) return;
-
-    if (chartInstanceRef.current) {
-      chartInstanceRef.current.remove();
-    }
+    if (!chartRef.current) return;
 
     const chart = createChart(chartRef.current, {
       layout: { background: { color: '#111827' }, textColor: '#9CA3AF' },
@@ -212,39 +210,7 @@ function EquityChart({
       localization: { priceFormatter: formatCurrency },
     });
     chartInstanceRef.current = chart;
-
-    const equityData = buildEquityData(snapshots);
-    const lineSeries = chart.addLineSeries({ color: '#3B82F6', lineWidth: 2 });
-    lineSeries.setData(equityData as Array<{ time: string; value: number }>);
-
-    // Build markers for visible symbols, using order's own filledAtSim timestamp
-    if (orders && orders.length > 0) {
-      const markers = orders
-        .filter((o) => visibleSymbols.has(o.symbol as string))
-        .map((order) => {
-          const side = order.side as string;
-          const sym = order.symbol as string;
-          const time = getOrderTime(order);
-          if (!time) return null;
-
-          const symIdx = symbols.indexOf(sym);
-          const colors = getSymbolColors(sym, symIdx);
-
-          return {
-            time: time as Time,
-            position: side === 'buy' ? ('belowBar' as const) : ('aboveBar' as const),
-            color: side === 'buy' ? colors.buy : colors.sell,
-            shape: side === 'buy' ? ('arrowUp' as const) : ('arrowDown' as const),
-            text: `${side === 'buy' ? 'B' : 'S'} ${sym}`,
-          };
-        })
-        .filter((marker): marker is EquityMarker => marker !== null)
-        .sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
-
-      lineSeries.setMarkers(markers as SeriesMarker<Time>[]);
-    }
-
-    chart.timeScale().fitContent();
+    lineSeriesRef.current = chart.addLineSeries({ color: '#3B82F6', lineWidth: 2 });
 
     const handleResize = () => {
       if (chartRef.current) chart.applyOptions({ width: chartRef.current.clientWidth });
@@ -254,8 +220,51 @@ function EquityChart({
       window.removeEventListener('resize', handleResize);
       chart.remove();
       chartInstanceRef.current = null;
+      lineSeriesRef.current = null;
     };
-  }, [snapshots, orders, symbols, visibleSymbols]);
+  }, []);
+
+  // Update equity data when snapshots change
+  const equityData = useMemo(() => buildEquityData(snapshots), [snapshots]);
+
+  useEffect(() => {
+    if (!lineSeriesRef.current || equityData.length === 0) return;
+    lineSeriesRef.current.setData(equityData as Array<{ time: string; value: number }>);
+    chartInstanceRef.current?.timeScale().fitContent();
+  }, [equityData]);
+
+  // Update markers when orders or visibility changes
+  useEffect(() => {
+    if (!lineSeriesRef.current) return;
+    if (!orders || orders.length === 0) {
+      lineSeriesRef.current.setMarkers([]);
+      return;
+    }
+
+    const markers = orders
+      .filter((o) => visibleSymbols.has(o.symbol as string))
+      .map((order) => {
+        const side = order.side as string;
+        const sym = order.symbol as string;
+        const time = getOrderTime(order);
+        if (!time) return null;
+
+        const symIdx = symbols.indexOf(sym);
+        const colors = getSymbolColors(sym, symIdx);
+
+        return {
+          time: time as Time,
+          position: side === 'buy' ? ('belowBar' as const) : ('aboveBar' as const),
+          color: side === 'buy' ? colors.buy : colors.sell,
+          shape: side === 'buy' ? ('arrowUp' as const) : ('arrowDown' as const),
+          text: `${side === 'buy' ? 'B' : 'S'} ${sym}`,
+        };
+      })
+      .filter((marker): marker is EquityMarker => marker !== null)
+      .sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+
+    lineSeriesRef.current.setMarkers(markers as SeriesMarker<Time>[]);
+  }, [orders, symbols, visibleSymbols]);
 
   return <div ref={chartRef} />;
 }

@@ -35,5 +35,8 @@
   },
   "dependencies": {
     "convex": "^1.34.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
   }
 }
