@@ -5,10 +5,11 @@
 # Usage:
 #   ./scripts/rebuild.sh              # rebuild all changed services
 #   ./scripts/rebuild.sh runtime      # rebuild only runtime
-#   ./scripts/rebuild.sh server       # rebuild only server (includes migrate)
+#   ./scripts/rebuild.sh server       # rebuild only server
 #   ./scripts/rebuild.sh web          # rebuild only web
 #   ./scripts/rebuild.sh runtime web  # rebuild runtime + web
 #   ./scripts/rebuild.sh --no-deps    # skip dependency install
+#   ./scripts/rebuild.sh --local       # skip Docker, run services locally
 #   ./scripts/rebuild.sh --logs       # tail logs after starting
 
 set -euo pipefail
@@ -19,13 +20,15 @@ cd "$ROOT_DIR"
 # --- Parse flags ---
 INSTALL_DEPS=true
 TAIL_LOGS=false
+LOCAL_MODE=false
 SERVICES=()
 
 for arg in "$@"; do
     case "$arg" in
         --no-deps)  INSTALL_DEPS=false ;;
+        --local)    LOCAL_MODE=true ;;
         --logs)     TAIL_LOGS=true ;;
-        runtime|server|web|migrate|postgres)
+        runtime|server|web)
             SERVICES+=("$arg")
             ;;
         *)
@@ -47,8 +50,8 @@ if [ ${#SERVICES[@]} -eq 0 ]; then
     if echo "$CHANGED_FILES" | grep -q "packages/runtime/"; then
         SERVICES+=("runtime")
     fi
-    if echo "$CHANGED_FILES" | grep -q "packages/server/\|packages/db/\|packages/shared/"; then
-        SERVICES+=("server" "migrate")
+    if echo "$CHANGED_FILES" | grep -q "packages/server/\|packages/shared/\|convex/"; then
+        SERVICES+=("server")
     fi
     if echo "$CHANGED_FILES" | grep -q "packages/web/"; then
         SERVICES+=("web")
@@ -57,15 +60,10 @@ if [ ${#SERVICES[@]} -eq 0 ]; then
     # If nothing detected or root files changed, rebuild everything
     if [ ${#SERVICES[@]} -eq 0 ]; then
         echo "    No specific package changes detected, rebuilding all."
-        SERVICES=("server" "migrate" "runtime" "web")
+        SERVICES=("server" "runtime" "web")
     else
         echo "    Will rebuild: ${SERVICES[*]}"
     fi
-fi
-
-# Server changes also require migrate rebuild (shared Dockerfile)
-if [[ " ${SERVICES[*]} " == *" server "* ]] && [[ " ${SERVICES[*]} " != *" migrate "* ]]; then
-    SERVICES+=("migrate")
 fi
 
 # --- Step 1: Install dependencies ---
@@ -120,61 +118,95 @@ if [ "$TESTS_OK" = false ]; then
     fi
 fi
 
-# --- Step 3: Build Docker images ---
-echo ""
-echo "==> Building Docker images: ${SERVICES[*]}..."
-docker compose build "${SERVICES[@]}"
+if [ "$LOCAL_MODE" = true ]; then
+    # --- Local mode: run services directly without Docker ---
+    echo ""
+    echo "==> Starting services locally..."
 
-# --- Step 4: Restart services ---
-echo ""
-echo "==> Restarting services..."
-docker compose up -d "${SERVICES[@]}"
+    # Ensure Convex functions are deployed
+    echo "    Syncing Convex functions..."
+    npx convex dev --once
 
-# --- Step 5: Wait for health checks ---
-echo ""
-echo "==> Waiting for services to be healthy..."
-TIMEOUT=60
-ELAPSED=0
-while [ $ELAPSED -lt $TIMEOUT ]; do
-    ALL_HEALTHY=true
-
+    PIDS=()
     if [[ " ${SERVICES[*]} " == *" server "* ]]; then
-        if ! docker inspect aegis-server --format='{{.State.Health.Status}}' 2>/dev/null | grep -q "healthy"; then
-            ALL_HEALTHY=false
-        fi
+        echo "    Starting server on :3001..."
+        pnpm --filter @aegis/server dev &
+        PIDS+=($!)
+    fi
+    if [[ " ${SERVICES[*]} " == *" runtime "* ]]; then
+        echo "    Starting runtime on :8000..."
+        (cd packages/runtime && uv run uvicorn aegis_runtime.api.app:app --reload --port 8000) &
+        PIDS+=($!)
+    fi
+    if [[ " ${SERVICES[*]} " == *" web "* ]]; then
+        echo "    Starting web on :5173..."
+        pnpm --filter @aegis/web dev &
+        PIDS+=($!)
     fi
 
-    if [[ " ${SERVICES[*]} " == *" runtime "* ]]; then
-        if ! docker inspect aegis-runtime --format='{{.State.Health.Status}}' 2>/dev/null | grep -q "healthy"; then
-            ALL_HEALTHY=false
+    echo ""
+    echo "==> Services started (PIDs: ${PIDS[*]}). Press Ctrl+C to stop all."
+    trap 'echo "Stopping..."; kill "${PIDS[@]}" 2>/dev/null; exit 0' INT TERM
+    wait
+else
+    # --- Docker mode ---
+
+    # --- Step 3: Build Docker images ---
+    echo ""
+    echo "==> Building Docker images: ${SERVICES[*]}..."
+    docker compose build "${SERVICES[@]}"
+
+    # --- Step 4: Restart services ---
+    echo ""
+    echo "==> Restarting services..."
+    docker compose up -d "${SERVICES[@]}"
+
+    # --- Step 5: Wait for health checks ---
+    echo ""
+    echo "==> Waiting for services to be healthy..."
+    TIMEOUT=60
+    ELAPSED=0
+    while [ $ELAPSED -lt $TIMEOUT ]; do
+        ALL_HEALTHY=true
+
+        if [[ " ${SERVICES[*]} " == *" server "* ]]; then
+            if ! docker inspect aegis-server --format='{{.State.Health.Status}}' 2>/dev/null | grep -q "healthy"; then
+                ALL_HEALTHY=false
+            fi
         fi
-    fi
+
+        if [[ " ${SERVICES[*]} " == *" runtime "* ]]; then
+            if ! docker inspect aegis-runtime --format='{{.State.Health.Status}}' 2>/dev/null | grep -q "healthy"; then
+                ALL_HEALTHY=false
+            fi
+        fi
+
+        if [ "$ALL_HEALTHY" = true ]; then
+            break
+        fi
+
+        sleep 2
+        ELAPSED=$((ELAPSED + 2))
+        printf "."
+    done
+    echo ""
 
     if [ "$ALL_HEALTHY" = true ]; then
-        break
+        echo "==> All services healthy!"
+    else
+        echo "==> WARNING: Some services may not be healthy yet (timed out after ${TIMEOUT}s)"
+        docker compose ps
     fi
 
-    sleep 2
-    ELAPSED=$((ELAPSED + 2))
-    printf "."
-done
-echo ""
-
-if [ "$ALL_HEALTHY" = true ]; then
-    echo "==> All services healthy!"
-else
-    echo "==> WARNING: Some services may not be healthy yet (timed out after ${TIMEOUT}s)"
-    docker compose ps
-fi
-
-# --- Step 6: Summary ---
-echo ""
-echo "==> Done! Services status:"
-docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
-
-# --- Optional: tail logs ---
-if [ "$TAIL_LOGS" = true ]; then
+    # --- Step 6: Summary ---
     echo ""
-    echo "==> Tailing logs (Ctrl+C to stop)..."
-    docker compose logs -f "${SERVICES[@]}"
+    echo "==> Done! Services status:"
+    docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
+
+    # --- Optional: tail logs ---
+    if [ "$TAIL_LOGS" = true ]; then
+        echo ""
+        echo "==> Tailing logs (Ctrl+C to stop)..."
+        docker compose logs -f "${SERVICES[@]}"
+    fi
 fi

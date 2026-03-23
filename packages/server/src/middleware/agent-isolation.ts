@@ -1,18 +1,11 @@
 import { createMiddleware } from 'hono/factory';
-import { eq } from 'drizzle-orm';
-import { db } from '../lib/db';
-import { runs, agents, soulVersions, agentEvents } from '@aegis/db/schema';
+import { convex } from '../lib/convex';
+import { api } from '../../../../convex/_generated/api';
 
-/**
- * Agent isolation middleware.
- * If ?agentContext is present, restricts access to only that agent's resources.
- * If absent, full owner/admin access.
- */
 export function agentIsolation(resourceType: 'agent' | 'run' | 'soul') {
   return createMiddleware(async (c, next) => {
     const agentContext = c.req.query('agentContext');
     if (!agentContext) {
-      // No isolation — owner/admin access
       return next();
     }
 
@@ -24,7 +17,7 @@ export function agentIsolation(resourceType: 'agent' | 'run' | 'soul') {
     } else if (resourceType === 'run') {
       const id = c.req.param('id');
       if (id) {
-        const run = await db.query.runs.findFirst({ where: eq(runs.id, id) });
+        const run = await convex.query(api.runs.get, { id: id as any });
         resourceAgentId = run?.agentId || null;
       }
     } else if (resourceType === 'soul') {
@@ -34,7 +27,21 @@ export function agentIsolation(resourceType: 'agent' | 'run' | 'soul') {
 
     if (resourceAgentId && resourceAgentId !== agentContext) {
       // Log violation attempt
-      await logViolationAttempt(agentContext, resourceAgentId, resourceType, c.req.url);
+      try {
+        await convex.mutation(api.webhookHandlers.logAgentEvent, {
+          runId: agentContext as any,
+          eventType: 'isolation.violation_attempt',
+          payload: {
+            requestingAgent: agentContext,
+            targetAgent: resourceAgentId,
+            resourceType,
+            url: c.req.url,
+            timestamp: new Date().toISOString(),
+          },
+        });
+      } catch {
+        // Best effort logging
+      }
 
       return c.json(
         {
@@ -49,27 +56,4 @@ export function agentIsolation(resourceType: 'agent' | 'run' | 'soul') {
 
     return next();
   });
-}
-
-async function logViolationAttempt(
-  requestingAgent: string,
-  targetAgent: string,
-  resourceType: string,
-  url: string,
-) {
-  try {
-    await db.insert(agentEvents).values({
-      runId: requestingAgent, // Use requesting agent as runId for logging
-      eventType: 'isolation.violation_attempt',
-      payload: {
-        requestingAgent,
-        targetAgent,
-        resourceType,
-        url,
-        timestamp: new Date().toISOString(),
-      },
-    });
-  } catch {
-    // Best effort logging — don't fail the request
-  }
 }

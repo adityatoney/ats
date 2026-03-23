@@ -63,19 +63,37 @@ function extractSymbols(snapshots: Array<Record<string, unknown>>): string[] {
   return Array.from(symbols).sort();
 }
 
+/** Convert a timestamp (string ISO date, or number Unix ms) to yyyy-mm-dd */
+function timestampToDateStr(ts: unknown): string | null {
+  if (typeof ts === 'string') {
+    const date = parseDate(ts);
+    return date ? toDateStr(date) : null;
+  }
+  if (typeof ts === 'number' && ts > 0) {
+    const d = new Date(ts);
+    if (!isNaN(d.getTime())) {
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+  }
+  return null;
+}
+
 /** Build the equity data series */
 function buildEquityData(snapshots: Array<Record<string, unknown>>): Array<{ time: string; value: number }> {
   const hasTimestamps = snapshots.some(
-    (s) => s.timestampSimulated && typeof s.timestampSimulated === 'string',
+    (s) => s.timestampSimulated != null && timestampToDateStr(s.timestampSimulated) !== null,
   );
 
   const raw = snapshots.map((s) => {
     const equity = Number(s.equity) || 0;
-    if (hasTimestamps && s.timestampSimulated) {
-      const date = parseDate(s.timestampSimulated as string);
-      if (date) return { time: toDateStr(date), value: equity };
+    if (hasTimestamps && s.timestampSimulated != null) {
+      const dateStr = timestampToDateStr(s.timestampSimulated);
+      if (dateStr) return { time: dateStr, value: equity };
     }
-    return { time: String((s.barIndex as number) + 1), value: equity };
+    // Fallback: use barIndex as a fake date (2020-01-01 + barIndex days)
+    const barIdx = (s.barIndex as number) ?? 0;
+    const fakeDate = new Date(2020, 0, 1 + barIdx);
+    return { time: `${fakeDate.getFullYear()}-${String(fakeDate.getMonth() + 1).padStart(2, '0')}-${String(fakeDate.getDate()).padStart(2, '0')}`, value: equity };
   });
 
   // Deduplicate
@@ -95,11 +113,9 @@ function buildEquityData(snapshots: Array<Record<string, unknown>>): Array<{ tim
 
 /** Extract time from order's filledAtSim or submittedAtSim timestamp */
 function getOrderTime(order: Record<string, unknown>): string | null {
-  const ts = (order.filledAtSim as string) || (order.submittedAtSim as string);
-  if (!ts) return null;
-  const date = parseDate(ts);
-  if (!date) return null;
-  return toDateStr(date);
+  const ts = order.filledAtSim ?? order.submittedAtSim;
+  if (ts == null) return null;
+  return timestampToDateStr(ts);
 }
 
 export function EquityCurve({ snapshots, orders }: Props) {

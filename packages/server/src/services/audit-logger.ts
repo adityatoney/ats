@@ -1,5 +1,5 @@
-import { db } from '../lib/db';
-import { agentEvents } from '@aegis/db/schema';
+import { convex } from '../lib/convex';
+import { api } from '../../../../convex/_generated/api';
 
 export const auditLogger = {
   async logIsolationViolation(data: {
@@ -9,8 +9,8 @@ export const auditLogger = {
     url: string;
   }) {
     try {
-      await db.insert(agentEvents).values({
-        runId: data.requestingAgent,
+      await convex.mutation(api.webhookHandlers.logAgentEvent, {
+        runId: data.requestingAgent as any,
         eventType: 'isolation.violation_attempt',
         payload: {
           ...data,

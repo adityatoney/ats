@@ -1,10 +1,11 @@
-import os
+"""
+Database connection module - deprecated.
+PostgreSQL has been replaced by Convex. All DB access goes through the Node.js API.
+This module is kept as a stub for backward compatibility.
+"""
 
-import psycopg
+import logging
 
+logger = logging.getLogger(__name__)
 
-def get_connection():
-    db_url = os.getenv(
-        "DATABASE_URL", "postgresql://aegis:aegis_dev@localhost:5432/aegis_trader"
-    )
-    return psycopg.connect(db_url)
+logger.info("PostgreSQL connection module deprecated - using Convex via Node.js API")

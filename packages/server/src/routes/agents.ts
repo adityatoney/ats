@@ -1,7 +1,6 @@
 import { Hono } from 'hono';
-import { eq, desc } from 'drizzle-orm';
-import { db } from '../lib/db';
-import { agents, strategyVersions, soulVersions, runs } from '@aegis/db/schema';
+import { convex, normalize, normalizeAll } from '../lib/convex';
+import { api } from '../../../../convex/_generated/api';
 import { agentIsolation } from '../middleware/agent-isolation';
 import { PythonRuntimeError, pythonClient } from '../lib/python-client';
 import {
@@ -25,48 +24,35 @@ agentRoutes.delete('/:id', async (c) => {
 });
 
 agentRoutes.get('/', async (c) => {
-  const allAgents = await db.query.agents.findMany({
-    orderBy: [desc(agents.createdAt)],
-  });
-  return c.json({ data: allAgents });
+  const allAgents = await convex.query(api.agents.list, {});
+  return c.json({ data: normalizeAll(allAgents) });
 });
 
 agentRoutes.get('/:id', agentIsolation('agent'), async (c) => {
   const id = c.req.param('id');
-  const agent = await db.query.agents.findFirst({
-    where: eq(agents.id, id),
-  });
+  const agent = await convex.query(api.agents.get, { id: id as any });
   if (!agent) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
 
-  const rawLatestStrategy = await db.query.strategyVersions.findFirst({
-    where: eq(strategyVersions.agentId, id),
-    orderBy: [desc(strategyVersions.version)],
-  });
+  const rawLatestStrategy = await convex.query(api.strategyVersions.getLatestByAgent, { agentId: id as any });
   const latestStrategy = rawLatestStrategy
     ? await ensureDeterministicArtifacts(rawLatestStrategy)
     : null;
 
-  const activeSoul = await db.query.soulVersions.findFirst({
-    where: eq(soulVersions.agentId, id),
-    orderBy: [desc(soulVersions.version)],
-  });
+  const activeSoul = await convex.query(api.soulVersions.getActiveByAgent, { agentId: id as any });
 
   return c.json({
     data: {
-      ...agent,
-      latestStrategy: latestStrategy || null,
-      activeSoul: activeSoul?.status === 'active' ? activeSoul : null,
+      ...normalize(agent),
+      latestStrategy: latestStrategy ? normalize(latestStrategy) : null,
+      activeSoul: activeSoul ? normalize(activeSoul) : null,
     },
   });
 });
 
 agentRoutes.get('/:id/runs', agentIsolation('agent'), async (c) => {
   const id = c.req.param('id');
-  const agentRuns = await db.query.runs.findMany({
-    where: eq(runs.agentId, id),
-    orderBy: [desc(runs.createdAt)],
-  });
-  return c.json({ data: agentRuns });
+  const agentRuns = await convex.query(api.runs.listByAgent, { agentId: id as any });
+  return c.json({ data: normalizeAll(agentRuns) });
 });
 
 agentRoutes.post('/compile-strategy', async (c) => {
@@ -113,15 +99,11 @@ agentRoutes.put('/:id/strategy', async (c) => {
     );
   }
 
-  const latestVersion = await db.query.strategyVersions.findFirst({
-    where: eq(strategyVersions.agentId, id),
-    orderBy: [desc(strategyVersions.version)],
-  });
-
+  const latestVersion = await convex.query(api.strategyVersions.getLatestByAgent, { agentId: id as any });
   const nextVersion = (latestVersion?.version || 0) + 1;
   const configJson = body.configJson || {};
 
-  let insertValues: typeof strategyVersions.$inferInsert;
+  let insertArgs: any;
 
   if (sourceKind === 'pine') {
     const strategyPine = body.strategyPine as string | undefined;
@@ -134,11 +116,11 @@ agentRoutes.put('/:id/strategy', async (c) => {
 
     try {
       const compiled = await compileDeterministicArtifacts('pine', strategyPine);
-      insertValues = {
-        agentId: id,
+      insertArgs = {
+        pgId: '',
+        agentId: id as any,
         version: nextVersion,
         sourceKind,
-        strategyMd: null,
         strategyPine: compiled.strategyPine,
         strategyPy: compiled.strategyPy,
         strategyIrJson: compiled.strategyIrJson,
@@ -165,8 +147,9 @@ agentRoutes.put('/:id/strategy', async (c) => {
 
     try {
       const compiled = await compileDeterministicArtifacts('markdown_yaml', strategyMd);
-      insertValues = {
-        agentId: id,
+      insertArgs = {
+        pgId: '',
+        agentId: id as any,
         version: nextVersion,
         sourceKind,
         strategyMd,
@@ -201,19 +184,19 @@ agentRoutes.put('/:id/strategy', async (c) => {
       return c.json({ error: { message, code: 'VALIDATION_FAILED' } }, 400);
     }
 
-    insertValues = {
-      agentId: id,
+    insertArgs = {
+      pgId: '',
+      agentId: id as any,
       version: nextVersion,
       sourceKind,
-      strategyMd: body.strategyMd || null,
-      strategyPine: null,
+      strategyMd: body.strategyMd || undefined,
       strategyPy,
-      strategyIrJson: null,
       configJson,
     };
   }
 
-  const [sv] = await db.insert(strategyVersions).values(insertValues).returning();
+  const svId = await convex.mutation(api.strategyVersions.create, insertArgs);
+  const sv = await convex.query(api.strategyVersions.get, { id: svId });
 
-  return c.json({ data: sv }, 201);
+  return c.json({ data: sv ? normalize(sv) : null }, 201);
 });

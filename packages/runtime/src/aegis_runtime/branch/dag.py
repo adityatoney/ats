@@ -3,9 +3,11 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-import psycopg
+import httpx
 
 logger = logging.getLogger(__name__)
+
+NODE_SERVER_URL = os.getenv("NODE_SERVER_URL", "http://localhost:3001")
 
 
 @dataclass
@@ -20,63 +22,41 @@ class DAGNode:
 
 class BranchDAG:
     def __init__(self, db_url: str | None = None):
-        self.db_url = db_url or os.getenv(
-            "DATABASE_URL", "postgresql://aegis:aegis_dev@localhost:5432/aegis_trader"
-        )
+        # db_url kept for backward compatibility but ignored — all DB access goes through Node API
+        self.api_url = NODE_SERVER_URL
 
     def build_dag(self, root_run_id: str) -> list[DAGNode]:
-        nodes: list[DAGNode] = []
-
-        with psycopg.connect(self.db_url) as conn:
-            with conn.cursor() as cur:
-                # Get root run
-                cur.execute(
-                    "SELECT id, status, metrics_json FROM runs WHERE id = %s",
-                    (root_run_id,),
-                )
-                root = cur.fetchone()
-                if not root:
-                    return []
-
-                nodes.append(
-                    DAGNode(
-                        id=root_run_id,
-                        run_id=root_run_id,
-                        parent_id=None,
-                        label="Root Run",
-                        status=root[1],
-                        metrics=root[2],
-                    )
-                )
-
-                # Get all branches from this root
-                self._collect_children(cur, root_run_id, nodes)
-
-        return nodes
-
-    def _collect_children(self, cur, parent_run_id: str, nodes: list[DAGNode]):
-        cur.execute(
-            """
-            SELECT b.id, b.run_id, b.change_summary, r.status, r.metrics_json
-            FROM branches b
-            JOIN runs r ON r.id = b.run_id
-            WHERE b.parent_run_id = %s
-            """,
-            (parent_run_id,),
+        """Build the branch DAG via the Node.js API."""
+        response = httpx.get(
+            f"{self.api_url}/api/branches/run/{root_run_id}",
+            timeout=10,
         )
-        for row in cur.fetchall():
-            branch_id, run_id, summary, status, metrics = row
+        if response.status_code != 200:
+            return []
+
+        data = response.json().get("data", {})
+        api_nodes = data.get("nodes", [])
+
+        nodes: list[DAGNode] = []
+        # Build a set of targets to identify parent relationships
+        edge_map: dict[str, str] = {}
+        for edge in data.get("edges", []):
+            edge_map[edge["target"]] = edge["source"]
+
+        for api_node in api_nodes:
+            node_data = api_node.get("data", {})
             nodes.append(
                 DAGNode(
-                    id=str(run_id),
-                    run_id=str(run_id),
-                    parent_id=parent_run_id,
-                    label=summary or f"Branch {str(branch_id)[:8]}",
-                    status=status,
-                    metrics=metrics,
+                    id=api_node["id"],
+                    run_id=api_node["id"],
+                    parent_id=edge_map.get(api_node["id"]),
+                    label=node_data.get("label", ""),
+                    status=node_data.get("status", "unknown"),
+                    metrics=node_data.get("metrics"),
                 )
             )
-            self._collect_children(cur, str(run_id), nodes)
+
+        return nodes
 
     def to_adjacency_list(self, nodes: list[DAGNode]) -> dict[str, Any]:
         node_list = []

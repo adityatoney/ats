@@ -1,40 +1,4 @@
 services:
-  postgres:
-    image: postgres:16
-    container_name: aegis-postgres
-    environment:
-      POSTGRES_USER: aegis
-      POSTGRES_PASSWORD: aegis_dev
-      POSTGRES_DB: aegis_trader
-    ports:
-      - "5432:5432"
-    volumes:
-      - aegis_pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis_trader"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # Run migrations + seed before starting app services
-  migrate:
-    build:
-      context: .
-      dockerfile: packages/server/Dockerfile
-    container_name: aegis-migrate
-    environment:
-      DATABASE_URL: postgresql://aegis:aegis_dev@postgres:5432/aegis_trader
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: >
-      sh -c "
-        cd packages/db &&
-        npx drizzle-kit migrate &&
-        npx tsx src/seed.ts &&
-        echo 'Migrations and seed complete'
-      "
-
   server:
     build:
       context: .
@@ -43,12 +7,9 @@ services:
     ports:
       - "3001:3001"
     environment:
-      DATABASE_URL: postgresql://aegis:aegis_dev@postgres:5432/aegis_trader
+      CONVEX_URL: ${CONVEX_URL}
       PORT: "3001"
       PYTHON_RUNTIME_URL: http://runtime:8000
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 10s
@@ -64,7 +25,6 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql://aegis:aegis_dev@postgres:5432/aegis_trader
       NODE_SERVER_URL: http://server:3001
       ALPACA_API_KEY: ${ALPACA_API_KEY}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
@@ -85,6 +45,8 @@ services:
     build:
       context: .
       dockerfile: packages/web/Dockerfile
+      args:
+        VITE_CONVEX_URL: ${CONVEX_URL}
     container_name: aegis-web
     ports:
       - "5173:5173"
@@ -93,5 +55,4 @@ services:
         condition: service_healthy
 
 volumes:
-  aegis_pgdata:
   aegis_data:

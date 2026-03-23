@@ -2,16 +2,17 @@ import logging
 import os
 from typing import Any
 
-import psycopg
+import httpx
 
 logger = logging.getLogger(__name__)
+
+NODE_SERVER_URL = os.getenv("NODE_SERVER_URL", "http://localhost:3001")
 
 
 class BranchManager:
     def __init__(self, db_url: str | None = None):
-        self.db_url = db_url or os.getenv(
-            "DATABASE_URL", "postgresql://aegis:aegis_dev@localhost:5432/aegis_trader"
-        )
+        # db_url kept for backward compatibility but ignored — all DB access goes through Node API
+        self.api_url = NODE_SERVER_URL
 
     def fork(
         self,
@@ -22,60 +23,24 @@ class BranchManager:
         overrides: dict[str, Any],
         creator_type: str = "user",
     ) -> tuple[str, str]:
-        import json
+        """Create a branch via the Node.js API."""
+        response = httpx.post(
+            f"{self.api_url}/api/checkpoints/{parent_checkpoint_id}/branch",
+            json={
+                "changeSummary": change_summary,
+                "rationale": rationale,
+                "overrides": overrides,
+                "creatorType": creator_type,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json().get("data", {})
 
-        with psycopg.connect(self.db_url) as conn:
-            with conn.cursor() as cur:
-                # Get parent run info
-                cur.execute(
-                    "SELECT agent_id, strategy_version_id, config_json FROM runs WHERE id = %s",
-                    (parent_run_id,),
-                )
-                parent = cur.fetchone()
-                if not parent:
-                    raise ValueError(f"Parent run not found: {parent_run_id}")
+        branch = data.get("branch", {})
+        run = data.get("run", {})
 
-                agent_id, strategy_version_id, config_json = parent
+        branch_id = branch.get("_id", branch.get("id", ""))
+        new_run_id = run.get("_id", run.get("id", ""))
 
-                # Create new run
-                cur.execute(
-                    """
-                    INSERT INTO runs (id, agent_id, strategy_version_id,
-                        status, run_type, config_json,
-                        total_bars, processed_bars, created_at)
-                    VALUES (gen_random_uuid(), %s, %s, 'pending', 'branch', %s::jsonb, 0, 0, NOW())
-                    RETURNING id
-                    """,
-                    (agent_id, strategy_version_id, json.dumps(config_json)),
-                )
-                new_run_id = str(cur.fetchone()[0])
-
-                # Create branch record
-                cur.execute(
-                    """
-                    INSERT INTO branches (id, run_id, parent_checkpoint_id, parent_run_id,
-                                          change_summary, rationale, creator_type, overrides_json,
-                                          status, created_at)
-                    VALUES (gen_random_uuid(), %s, %s, %s, %s, %s, %s, %s::jsonb, 'pending', NOW())
-                    RETURNING id
-                    """,
-                    (
-                        new_run_id,
-                        parent_checkpoint_id,
-                        parent_run_id,
-                        change_summary,
-                        rationale,
-                        creator_type,
-                        json.dumps(overrides),
-                    ),
-                )
-                branch_id = str(cur.fetchone()[0])
-
-                # Link run to branch
-                cur.execute(
-                    "UPDATE runs SET branch_id = %s WHERE id = %s",
-                    (branch_id, new_run_id),
-                )
-
-                conn.commit()
-                return branch_id, new_run_id
+        return branch_id, new_run_id

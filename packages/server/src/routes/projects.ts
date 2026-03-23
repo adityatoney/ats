@@ -1,47 +1,40 @@
 import { Hono } from 'hono';
-import { eq } from 'drizzle-orm';
-import { db } from '../lib/db';
-import { projects, agents } from '@aegis/db/schema';
+import { convex, normalize, normalizeAll } from '../lib/convex';
+import { api } from '../../../../convex/_generated/api';
 
 export const projectRoutes = new Hono();
 
 projectRoutes.post('/', async (c) => {
   const body = await c.req.json();
-  const [project] = await db
-    .insert(projects)
-    .values({
-      name: body.name,
-      description: body.description || null,
-      ownerId: body.ownerId,
-    })
-    .returning();
+  const project = await convex.mutation(api.projects.create, {
+    pgId: '',
+    ownerId: body.ownerId as any,
+    name: body.name,
+    description: body.description || undefined,
+  });
   return c.json({ data: project }, 201);
 });
 
 projectRoutes.get('/:id', async (c) => {
   const id = c.req.param('id');
-  const project = await db.query.projects.findFirst({
-    where: eq(projects.id, id),
-  });
+  const project = await convex.query(api.projects.get, { id: id as any });
   if (!project) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
 
-  const projectAgents = await db.query.agents.findMany({
-    where: eq(agents.projectId, id),
-  });
+  const projectAgents = await convex.query(api.agents.listByProject, { projectId: id as any });
 
-  return c.json({ data: { ...project, agents: projectAgents } });
+  return c.json({ data: { ...normalize(project), agents: normalizeAll(projectAgents) } });
 });
 
 projectRoutes.post('/:pid/agents', async (c) => {
   const pid = c.req.param('pid');
   const body = await c.req.json();
-  const [agent] = await db
-    .insert(agents)
-    .values({
-      projectId: pid,
-      name: body.name,
-      status: 'idle',
-    })
-    .returning();
-  return c.json({ data: agent }, 201);
+  const agentId = await convex.mutation(api.agents.create, {
+    pgId: '',
+    projectId: pid as any,
+    name: body.name,
+    status: 'idle',
+    updatedAt: Date.now(),
+  });
+  const agent = await convex.query(api.agents.get, { id: agentId as any });
+  return c.json({ data: agent ? normalize(agent) : null }, 201);
 });

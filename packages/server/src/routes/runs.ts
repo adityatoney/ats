@@ -1,7 +1,6 @@
 import { Hono } from 'hono';
-import { eq, desc, asc } from 'drizzle-orm';
-import { db } from '../lib/db';
-import { runs, orders, fills, portfolioSnapshots, agentEvents, checkpoints } from '@aegis/db/schema';
+import { convex, normalize, normalizeAll } from '../lib/convex';
+import { api } from '../../../../convex/_generated/api';
 import { runManager } from '../services/run-manager';
 import { agentIsolation } from '../middleware/agent-isolation';
 import { deleteRun } from '../services/delete-service';
@@ -34,14 +33,14 @@ runRoutes.post('/', async (c) => {
     seed: body.seed || 42,
     checkpointInterval: body.checkpointInterval || 50,
   });
-  return c.json({ data: run }, 201);
+  return c.json({ data: run ? normalize(run) : run }, 201);
 });
 
 runRoutes.get('/:id', agentIsolation('run'), async (c) => {
   const id = c.req.param('id');
-  const run = await db.query.runs.findFirst({ where: eq(runs.id, id) });
+  const run = await convex.query(api.runs.get, { id: id as any });
   if (!run) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
-  return c.json({ data: run });
+  return c.json({ data: normalize(run) });
 });
 
 runRoutes.get('/:id/events', async (c) => {
@@ -49,59 +48,51 @@ runRoutes.get('/:id/events', async (c) => {
   const offset = parseInt(c.req.query('offset') || '0');
   const limit = parseInt(c.req.query('limit') || '50');
 
-  const events = await db.query.agentEvents.findMany({
-    where: eq(agentEvents.runId, id),
-    orderBy: [asc(agentEvents.createdAt)],
+  const events = await convex.query(api.agentEvents.listByRunPaginated, {
+    runId: id as any,
     offset,
     limit,
   });
-  return c.json({ data: events });
+  return c.json({ data: normalizeAll(events) });
 });
 
 runRoutes.get('/:id/orders', agentIsolation('run'), async (c) => {
   const id = c.req.param('id');
-  const orderList = await db
-    .select({
-      id: orders.id,
-      runId: orders.runId,
-      symbol: orders.symbol,
-      side: orders.side,
-      orderType: orders.orderType,
-      quantity: orders.quantity,
-      limitPrice: orders.limitPrice,
-      stopPrice: orders.stopPrice,
-      status: orders.status,
-      submittedAtSim: orders.submittedAtSim,
-      filledAtSim: orders.filledAtSim,
-      barIndex: orders.barIndex,
-      createdAt: orders.createdAt,
-      fillPrice: fills.fillPrice,
-      fee: fills.fee,
-      slippage: fills.slippage,
-    })
-    .from(orders)
-    .leftJoin(fills, eq(fills.orderId, orders.id))
-    .where(eq(orders.runId, id))
-    .orderBy(orders.barIndex);
-  return c.json({ data: orderList });
+  // Fetch orders and fills separately, then merge (replaces LEFT JOIN)
+  const orderList = await convex.query(api.orders.listByRun, { runId: id as any });
+  const fillsList = await convex.query(api.fills.listByRun, { runId: id as any });
+
+  // Create a map of orderId → fill
+  const fillByOrder = new Map<string, any>();
+  for (const fill of fillsList) {
+    fillByOrder.set(fill.orderId, fill);
+  }
+
+  // Merge orders with their fills
+  const merged = orderList.map((order) => {
+    const fill = fillByOrder.get(order._id);
+    return {
+      ...order,
+      id: order._id,
+      fillPrice: fill?.fillPrice ?? null,
+      fee: fill?.fee ?? null,
+      slippage: fill?.slippage ?? null,
+    };
+  });
+
+  return c.json({ data: merged });
 });
 
 runRoutes.get('/:id/portfolio', agentIsolation('run'), async (c) => {
   const id = c.req.param('id');
-  const snapshots = await db.query.portfolioSnapshots.findMany({
-    where: eq(portfolioSnapshots.runId, id),
-    orderBy: [portfolioSnapshots.barIndex],
-  });
-  return c.json({ data: snapshots });
+  const snapshots = await convex.query(api.portfolioSnapshots.listByRun, { runId: id as any });
+  return c.json({ data: normalizeAll(snapshots) });
 });
 
 runRoutes.get('/:id/checkpoints', async (c) => {
   const id = c.req.param('id');
-  const cps = await db.query.checkpoints.findMany({
-    where: eq(checkpoints.runId, id),
-    orderBy: [checkpoints.barIndex],
-  });
-  return c.json({ data: cps });
+  const cps = await convex.query(api.checkpoints.listByRun, { runId: id as any });
+  return c.json({ data: normalizeAll(cps) });
 });
 
 runRoutes.post('/:id/pause', async (c) => {
@@ -124,12 +115,11 @@ runRoutes.post('/:id/cancel', async (c) => {
 
 runRoutes.post('/:id/generate-soul', async (c) => {
   const id = c.req.param('id');
-  const run = await db.query.runs.findFirst({ where: eq(runs.id, id) });
+  const run = await convex.query(api.runs.get, { id: id as any });
   if (!run) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
 
   const { pythonClient } = await import('../lib/python-client');
 
-  // If run is part of a tournament, include competitive context
   let competitiveContext: Record<string, unknown> | undefined;
   if (run.tournamentId) {
     const { leaderboardService } = await import('../services/leaderboard-service');
@@ -141,4 +131,13 @@ runRoutes.post('/:id/generate-soul', async (c) => {
 
   await pythonClient.generateSoul({ runId: id, agentId: run.agentId, competitiveContext });
   return c.json({ data: { status: 'generating' } });
+});
+
+// PATCH endpoint for Python runtime to update run
+runRoutes.patch('/:id', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json();
+  await convex.mutation(api.runs.update, { id: id as any, ...body });
+  const updated = await convex.query(api.runs.get, { id: id as any });
+  return c.json({ data: updated ? normalize(updated) : updated });
 });

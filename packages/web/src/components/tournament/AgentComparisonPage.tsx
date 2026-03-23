@@ -6,8 +6,8 @@ import { createChart, ColorType, type IChartApi } from 'lightweight-charts';
 
 interface Snapshot {
   barIndex: number;
-  equity: string;
-  timestampSimulated: string | null;
+  equity: string | number;
+  timestampSimulated: string | number | null;
 }
 
 interface ComparisonEntry {
@@ -78,12 +78,22 @@ export function AgentComparisonPage() {
         title: agent.agentName,
       });
 
-      const data = agent.snapshots.map((s) => ({
-        time: s.timestampSimulated
-          ? (s.timestampSimulated.split('T')[0] as string)
-          : `${2020 + Math.floor(s.barIndex / 252)}-01-01`,
-        value: parseFloat(s.equity),
-      }));
+      const data = agent.snapshots.map((s) => {
+        let time: string;
+        if (s.timestampSimulated != null) {
+          if (typeof s.timestampSimulated === 'number') {
+            const d = new Date(s.timestampSimulated);
+            time = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          } else {
+            time = s.timestampSimulated.split('T')[0];
+          }
+        } else {
+          // Fallback: use barIndex as fake date
+          const d = new Date(2020, 0, 1 + s.barIndex);
+          time = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        }
+        return { time, value: typeof s.equity === 'number' ? s.equity : parseFloat(s.equity) };
+      });
 
       // Deduplicate by time
       const seen = new Set<string>();

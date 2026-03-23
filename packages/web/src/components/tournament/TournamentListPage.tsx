@@ -50,7 +50,7 @@ export function TournamentListPage() {
                     <h3 className="font-semibold">{t.name}</h3>
                     <p className="text-sm text-gray-400 mt-1">
                       {t.agentCount} agents · Created{' '}
-                      {new Date(t.createdAt).toLocaleDateString()}
+                      {new Date((t._creationTime ?? t.createdAt) as number | string).toLocaleDateString()}
                     </p>
                   </div>
                   <div className="flex items-center gap-3">

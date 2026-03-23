@@ -20,14 +20,20 @@
     "docker:up:build": "docker compose up -d --build",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f",
-    "db:generate": "pnpm --filter @aegis/db generate",
-    "db:migrate": "pnpm --filter @aegis/db migrate",
-    "db:seed": "pnpm --filter @aegis/db seed",
+    "docker:restart": "docker compose down && docker compose up -d --build",
+    "convex:dev": "npx convex dev",
+    "convex:deploy": "npx convex deploy",
+    "convex:seed": "npx convex run seed:seedDatabase",
+    "migrate:to-convex": "npx tsx scripts/migrate-to-convex.ts",
+    "verify:migration": "npx tsx scripts/verify-migration.ts",
     "build": "turbo build"
   },
   "devDependencies": {
+    "prettier": "^3.5.0",
     "turbo": "^2.5.0",
-    "typescript": "^5.8.0",
-    "prettier": "^3.5.0"
+    "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "convex": "^1.34.0"
   }
 }

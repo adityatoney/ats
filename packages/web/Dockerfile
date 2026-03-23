@@ -2,10 +2,13 @@ FROM node:22-slim AS build
 RUN corepack enable && corepack prepare pnpm@10.31.0 --activate
 WORKDIR /app
 
+# Accept build-time env var for Convex URL
+ARG VITE_CONVEX_URL
+ENV VITE_CONVEX_URL=${VITE_CONVEX_URL}
+
 # Copy all workspace files so pnpm resolves correctly
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
-COPY packages/db/package.json packages/db/
 COPY packages/server/package.json packages/server/
 COPY packages/web/package.json packages/web/
 

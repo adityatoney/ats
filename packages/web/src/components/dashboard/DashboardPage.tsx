@@ -56,7 +56,7 @@ export function DashboardPage() {
                     <TournamentStatusBadge status={t.status as string} />
                   </div>
                   <p className="text-xs text-gray-400">
-                    {t.agentCount as number} agents · {new Date(t.createdAt as string).toLocaleDateString()}
+                    {t.agentCount as number} agents · {new Date((t._creationTime ?? t.createdAt) as number | string).toLocaleDateString()}
                   </p>
                 </Link>
               ))}
@@ -86,7 +86,7 @@ export function DashboardPage() {
                   <StatusBadge status={agent.status as string} />
                 </div>
                 <p className="text-sm text-gray-400">
-                  Created: {new Date(agent.createdAt as string).toLocaleDateString()}
+                  Created: {new Date((agent._creationTime ?? agent.createdAt) as number | string).toLocaleDateString()}
                 </p>
               </Link>
             ))}

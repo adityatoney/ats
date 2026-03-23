@@ -2,88 +2,80 @@ import logging
 import os
 from typing import Any
 
-import psycopg
+import httpx
 
 logger = logging.getLogger(__name__)
+
+NODE_SERVER_URL = os.getenv("NODE_SERVER_URL", "http://localhost:3001")
 
 
 class CheckpointManager:
     def __init__(self, db_url: str | None = None):
-        self.db_url = db_url or os.getenv(
-            "DATABASE_URL", "postgresql://aegis:aegis_dev@localhost:5432/aegis_trader"
-        )
+        # db_url kept for backward compatibility but ignored — all DB access goes through Node API
+        self.api_url = NODE_SERVER_URL
 
     def save_checkpoint(self, run_id: str, bar_index: int, state: dict[str, Any]) -> str:
-        import json
-
-        with psycopg.connect(self.db_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO checkpoints (id, run_id, bar_index, state_blob, created_at)
-                    VALUES (gen_random_uuid(), %s, %s, %s::jsonb, NOW())
-                    RETURNING id
-                    """,
-                    (run_id, bar_index, json.dumps(state)),
-                )
-                result = cur.fetchone()
-                conn.commit()
-                checkpoint_id = str(result[0])
-                logger.info(f"Saved checkpoint {checkpoint_id} for run {run_id} at bar {bar_index}")
-                return checkpoint_id
+        """Save a checkpoint via the Node.js webhook endpoint."""
+        response = httpx.post(
+            f"{self.api_url}/api/webhooks/runtime-event",
+            json={
+                "runId": run_id,
+                "eventType": "checkpoint.saved",
+                "payload": {
+                    "barIndex": bar_index,
+                    "stateBlob": state,
+                },
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        checkpoint_id = data.get("data", {}).get("checkpointId", "unknown")
+        logger.info(f"Saved checkpoint {checkpoint_id} for run {run_id} at bar {bar_index}")
+        return checkpoint_id
 
     def load_checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
-        with psycopg.connect(self.db_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT state_blob FROM checkpoints WHERE id = %s",
-                    (checkpoint_id,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    raise ValueError(f"Checkpoint not found: {checkpoint_id}")
-                return row[0]
+        """Load a checkpoint by ID from the Node.js API."""
+        response = httpx.get(
+            f"{self.api_url}/api/checkpoints/{checkpoint_id}",
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json().get("data")
+        if not data:
+            raise ValueError(f"Checkpoint not found: {checkpoint_id}")
+        return data.get("stateBlob", {})
 
     def list_checkpoints(self, run_id: str) -> list[dict[str, Any]]:
-        with psycopg.connect(self.db_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, bar_index, timestamp_simulated, created_at
-                    FROM checkpoints
-                    WHERE run_id = %s
-                    ORDER BY bar_index
-                    """,
-                    (run_id,),
-                )
-                return [
-                    {
-                        "id": str(row[0]),
-                        "bar_index": row[1],
-                        "timestamp_simulated": str(row[2]) if row[2] else None,
-                        "created_at": str(row[3]),
-                    }
-                    for row in cur.fetchall()
-                ]
+        """List checkpoints for a run from the Node.js API."""
+        response = httpx.get(
+            f"{self.api_url}/api/checkpoints/run/{run_id}",
+            timeout=10,
+        )
+        response.raise_for_status()
+        checkpoints = response.json().get("data", [])
+        return [
+            {
+                "id": cp.get("_id", cp.get("id")),
+                "bar_index": cp.get("barIndex"),
+                "timestamp_simulated": cp.get("timestampSimulated"),
+                "created_at": cp.get("_creationTime"),
+            }
+            for cp in checkpoints
+        ]
 
     def get_latest_checkpoint(self, run_id: str) -> dict[str, Any] | None:
-        with psycopg.connect(self.db_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, bar_index, state_blob
-                    FROM checkpoints
-                    WHERE run_id = %s
-                    ORDER BY bar_index DESC
-                    LIMIT 1
-                    """,
-                    (run_id,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    return None
-                return {
-                    "id": str(row[0]),
-                    "bar_index": row[1],
-                    "state": row[2],
-                }
+        """Get the latest checkpoint for a run from the Node.js API."""
+        response = httpx.get(
+            f"{self.api_url}/api/checkpoints/run/{run_id}/latest",
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json().get("data")
+        if not data:
+            return None
+        return {
+            "id": data.get("_id", data.get("id")),
+            "bar_index": data.get("barIndex"),
+            "state": data.get("stateBlob", {}),
+        }

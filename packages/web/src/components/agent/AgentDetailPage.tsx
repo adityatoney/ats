@@ -211,7 +211,7 @@ export function AgentDetailPage() {
             {latestStrategy && (
               <p className="mt-0.5 text-xs text-gray-500">
                 Strategy v{latestStrategy.version as number} &middot;{' '}
-                {new Date(latestStrategy.createdAt as string).toLocaleString()}
+                {new Date((latestStrategy._creationTime ?? latestStrategy.createdAt) as number | string).toLocaleString()}
               </p>
             )}
           </div>
@@ -508,7 +508,7 @@ export function AgentDetailPage() {
                       </div>
                     </div>
                     <p className="text-xs text-gray-500">
-                      Created: {new Date(sv.createdAt as string).toLocaleString()}
+                      Created: {new Date((sv._creationTime ?? sv.createdAt) as number | string).toLocaleString()}
                     </p>
                   </div>
                 ))}
@@ -546,7 +546,7 @@ export function AgentDetailPage() {
                     </div>
                     <div>
                       <span className="text-gray-500">Started:</span>{' '}
-                      {run.startedAt ? new Date(run.startedAt as string).toLocaleString() : 'N/A'}
+                      {run.startedAt ? new Date(run.startedAt as number | string).toLocaleString() : 'N/A'}
                     </div>
                   </div>
                   {Boolean(run.metricsJson) && (

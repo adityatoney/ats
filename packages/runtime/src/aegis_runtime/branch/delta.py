@@ -1,34 +1,31 @@
 import logging
 import os
 
-import psycopg
+import httpx
 
 logger = logging.getLogger(__name__)
+
+NODE_SERVER_URL = os.getenv("NODE_SERVER_URL", "http://localhost:3001")
 
 
 class DeltaComputer:
     @staticmethod
     async def compute_delta(parent_run_id: str, branch_run_id: str) -> dict[str, float]:
-        db_url = os.getenv(
-            "DATABASE_URL", "postgresql://aegis:aegis_dev@localhost:5432/aegis_trader"
-        )
+        """Compute the delta between two runs' metrics via the Node.js API."""
+        async with httpx.AsyncClient(timeout=10) as client:
+            parent_resp = await client.get(f"{NODE_SERVER_URL}/api/runs/{parent_run_id}")
+            branch_resp = await client.get(f"{NODE_SERVER_URL}/api/runs/{branch_run_id}")
 
-        with psycopg.connect(db_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT metrics_json FROM runs WHERE id = %s",
-                    (parent_run_id,),
-                )
-                parent_row = cur.fetchone()
+        parent_metrics = {}
+        branch_metrics = {}
 
-                cur.execute(
-                    "SELECT metrics_json FROM runs WHERE id = %s",
-                    (branch_run_id,),
-                )
-                branch_row = cur.fetchone()
+        if parent_resp.status_code == 200:
+            parent_data = parent_resp.json().get("data", {})
+            parent_metrics = parent_data.get("metricsJson") or {}
 
-        parent_metrics = parent_row[0] if parent_row and parent_row[0] else {}
-        branch_metrics = branch_row[0] if branch_row and branch_row[0] else {}
+        if branch_resp.status_code == 200:
+            branch_data = branch_resp.json().get("data", {})
+            branch_metrics = branch_data.get("metricsJson") or {}
 
         def delta(key: str) -> float:
             return round(

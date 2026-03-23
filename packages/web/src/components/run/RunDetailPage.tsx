@@ -120,7 +120,7 @@ export function RunDetailPage() {
       ? dbEvents.map((e) => ({
           type: e.eventType as string,
           data: e.payload as Record<string, unknown>,
-          time: e.createdAt as string,
+          time: (e._creationTime ? new Date(e._creationTime as number).toISOString() : e.createdAt) as string,
         }))
       : sseEvents.map((e) => ({
           type: e.type,

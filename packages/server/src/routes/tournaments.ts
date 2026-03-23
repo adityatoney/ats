@@ -1,20 +1,11 @@
 import { Hono } from 'hono';
-import { eq, desc } from 'drizzle-orm';
-import { db } from '../lib/db';
-import {
-  tournaments,
-  tournamentEntries,
-  leaderboardEntries,
-  runs,
-  agents,
-  portfolioSnapshots,
-} from '@aegis/db/schema';
+import { convex, normalize, normalizeAll } from '../lib/convex';
+import { api } from '../../../../convex/_generated/api';
 import { tournamentManager } from '../services/tournament-manager';
 import { deleteTournament } from '../services/delete-service';
 
 export const tournamentRoutes = new Hono();
 
-// Delete tournament
 tournamentRoutes.delete('/:id', async (c) => {
   const id = c.req.param('id');
   try {
@@ -27,7 +18,6 @@ tournamentRoutes.delete('/:id', async (c) => {
   }
 });
 
-// Create tournament
 tournamentRoutes.post('/', async (c) => {
   const body = await c.req.json();
   const { projectId, name, agentIds, config } = body;
@@ -40,93 +30,69 @@ tournamentRoutes.post('/', async (c) => {
   }
 
   const tournament = await tournamentManager.createTournament(projectId, name, agentIds, config);
-  return c.json({ data: tournament }, 201);
+  return c.json({ data: tournament ? normalize(tournament) : tournament }, 201);
 });
 
-// List tournaments
 tournamentRoutes.get('/', async (c) => {
   const projectId = c.req.query('projectId');
   const allTournaments = projectId
-    ? await db.query.tournaments.findMany({
-        where: eq(tournaments.projectId, projectId),
-        orderBy: [desc(tournaments.createdAt)],
-      })
-    : await db.query.tournaments.findMany({
-        orderBy: [desc(tournaments.createdAt)],
-      });
-  return c.json({ data: allTournaments });
+    ? await convex.query(api.tournaments.listByProject, { projectId: projectId as any })
+    : await convex.query(api.tournaments.list, {});
+  return c.json({ data: normalizeAll(allTournaments) });
 });
 
-// Get tournament detail
 tournamentRoutes.get('/:id', async (c) => {
   const id = c.req.param('id');
-  const tournament = await db.query.tournaments.findFirst({
-    where: eq(tournaments.id, id),
-  });
+  const tournament = await convex.query(api.tournaments.get, { id: id as any });
   if (!tournament) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
 
-  const entries = await db.query.tournamentEntries.findMany({
-    where: eq(tournamentEntries.tournamentId, id),
-  });
+  const entries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: id as any });
 
-  // Enrich entries with agent name and run data
   const enrichedEntries = await Promise.all(
-    entries.map(async (entry) => {
-      const agent = await db.query.agents.findFirst({
-        where: eq(agents.id, entry.agentId),
-      });
+    entries.map(async (entry: any) => {
+      const agent = await convex.query(api.agents.get, { id: entry.agentId as any });
       const run = entry.runId
-        ? await db.query.runs.findFirst({ where: eq(runs.id, entry.runId) })
+        ? await convex.query(api.runs.get, { id: entry.runId as any })
         : null;
       return {
-        ...entry,
+        ...normalize(entry),
         agentName: agent?.name || 'Unknown',
-        run,
+        run: run ? normalize(run) : null,
       };
     }),
   );
 
-  return c.json({ data: { ...tournament, entries: enrichedEntries } });
+  return c.json({ data: { ...normalize(tournament), entries: enrichedEntries } });
 });
 
-// Start tournament
 tournamentRoutes.post('/:id/start', async (c) => {
   const id = c.req.param('id');
   const result = await tournamentManager.startTournament(id);
   return c.json({ data: result });
 });
 
-// Cancel tournament
 tournamentRoutes.post('/:id/cancel', async (c) => {
   const id = c.req.param('id');
   await tournamentManager.cancelTournament(id);
   return c.json({ data: { status: 'cancelled' } });
 });
 
-// Get leaderboard
 tournamentRoutes.get('/:id/leaderboard', async (c) => {
   const id = c.req.param('id');
   const agentContext = c.req.query('agentContext');
 
-  const entries = await db.query.leaderboardEntries.findMany({
-    where: eq(leaderboardEntries.tournamentId, id),
-    orderBy: [leaderboardEntries.rank],
-  });
+  const entries = await convex.query(api.leaderboardEntries.listByTournament, { tournamentId: id as any });
 
-  // Enrich with agent names
   const enriched = await Promise.all(
-    entries.map(async (entry) => {
-      const agent = await db.query.agents.findFirst({
-        where: eq(agents.id, entry.agentId),
-      });
-      return { ...entry, agentName: agent?.name || 'Unknown' };
+    entries.map(async (entry: any) => {
+      const agent = await convex.query(api.agents.get, { id: entry.agentId as any });
+      return { ...normalize(entry), agentName: agent?.name || 'Unknown' };
     }),
   );
 
   if (agentContext) {
-    // Restricted view: only show rank, name, return, Sharpe, drawdown
     return c.json({
-      data: enriched.map((e) => ({
+      data: enriched.map((e: any) => ({
         rank: e.rank,
         agentId: e.agentId,
         agentName: e.agentName,
@@ -141,30 +107,22 @@ tournamentRoutes.get('/:id/leaderboard', async (c) => {
   return c.json({ data: enriched });
 });
 
-// Get comparison data (all agents' portfolio snapshots)
 tournamentRoutes.get('/:id/comparison', async (c) => {
   const id = c.req.param('id');
 
-  const entries = await db.query.tournamentEntries.findMany({
-    where: eq(tournamentEntries.tournamentId, id),
-  });
+  const entries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: id as any });
 
   const comparison = await Promise.all(
-    entries.map(async (entry) => {
-      const agent = await db.query.agents.findFirst({
-        where: eq(agents.id, entry.agentId),
-      });
+    entries.map(async (entry: any) => {
+      const agent = await convex.query(api.agents.get, { id: entry.agentId as any });
       const snapshots = entry.runId
-        ? await db.query.portfolioSnapshots.findMany({
-            where: eq(portfolioSnapshots.runId, entry.runId),
-            orderBy: [portfolioSnapshots.barIndex],
-          })
+        ? await convex.query(api.portfolioSnapshots.listByRun, { runId: entry.runId as any })
         : [];
       return {
         agentId: entry.agentId,
         agentName: agent?.name || 'Unknown',
         runId: entry.runId,
-        snapshots,
+        snapshots: normalizeAll(snapshots),
       };
     }),
   );

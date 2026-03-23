@@ -1,34 +1,20 @@
-import { eq, and, desc } from 'drizzle-orm';
-import { db } from '../lib/db';
-import {
-  leaderboardEntries,
-  tournamentEntries,
-  runs,
-  agents,
-} from '@aegis/db/schema';
+import { convex } from '../lib/convex';
+import { api } from '../../../../convex/_generated/api';
 
 export const leaderboardService = {
   async computeLeaderboard(tournamentId: string, rankingMetric = 'sharpeRatio') {
-    // Get all completed entries
-    const entries = await db.query.tournamentEntries.findMany({
-      where: and(
-        eq(tournamentEntries.tournamentId, tournamentId),
-        eq(tournamentEntries.status, 'completed'),
-      ),
-    });
+    const entries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: tournamentId as any });
+    const completedEntries = entries.filter((e: any) => e.status === 'completed');
 
-    // Fetch run metrics for each entry
     const entryMetrics: Array<{
       agentId: string;
       runId: string;
       metrics: Record<string, number>;
     }> = [];
 
-    for (const entry of entries) {
+    for (const entry of completedEntries) {
       if (!entry.runId) continue;
-      const run = await db.query.runs.findFirst({
-        where: eq(runs.id, entry.runId),
-      });
+      const run = await convex.query(api.runs.get, { id: entry.runId });
       if (!run?.metricsJson) continue;
 
       entryMetrics.push({
@@ -38,83 +24,72 @@ export const leaderboardService = {
       });
     }
 
-    // Sort by ranking metric (descending — higher is better)
-    // Exception: maxDrawdown should be sorted ascending (less negative is better)
-    const isLowerBetter = rankingMetric === 'maxDrawdown';
+    // Sort by ranking metric
     entryMetrics.sort((a, b) => {
       const aVal = a.metrics[rankingMetric] ?? 0;
       const bVal = b.metrics[rankingMetric] ?? 0;
-      return isLowerBetter ? bVal - aVal : bVal - aVal;
+      return bVal - aVal;
     });
 
-    // For maxDrawdown, we actually want the LEAST negative (closest to 0) to rank first
     if (rankingMetric === 'maxDrawdown') {
       entryMetrics.sort((a, b) => {
         const aVal = a.metrics[rankingMetric] ?? 0;
         const bVal = b.metrics[rankingMetric] ?? 0;
-        // Less negative (closer to 0) = better
         return bVal - aVal;
       });
     }
 
-    // Delete existing leaderboard entries for this tournament
-    await db
-      .delete(leaderboardEntries)
-      .where(eq(leaderboardEntries.tournamentId, tournamentId));
+    // Delete existing leaderboard entries
+    await convex.mutation(api.leaderboardEntries.deleteByTournament, { tournamentId: tournamentId as any });
 
     // Insert ranked entries
     for (let i = 0; i < entryMetrics.length; i++) {
       const em = entryMetrics[i];
       const m = em.metrics;
 
-      await db.insert(leaderboardEntries).values({
-        tournamentId,
-        agentId: em.agentId,
-        runId: em.runId,
+      await convex.mutation(api.leaderboardEntries.create, {
+        pgId: '',
+        tournamentId: tournamentId as any,
+        agentId: em.agentId as any,
+        runId: em.runId as any,
         rank: i + 1,
-        totalReturn: String(m.totalReturn ?? 0),
-        sharpeRatio: String(m.sharpeRatio ?? 0),
-        sortinoRatio: String(m.sortinoRatio ?? 0),
-        maxDrawdown: String(m.maxDrawdown ?? 0),
-        winRate: String(m.winRate ?? 0),
-        profitFactor: String(m.profitFactor ?? 0),
-        netProfit: String(m.netProfit ?? 0),
+        totalReturn: m.totalReturn ?? 0,
+        sharpeRatio: m.sharpeRatio ?? 0,
+        sortinoRatio: m.sortinoRatio ?? 0,
+        maxDrawdown: m.maxDrawdown ?? 0,
+        winRate: m.winRate ?? 0,
+        profitFactor: m.profitFactor ?? 0,
+        netProfit: m.netProfit ?? 0,
         totalTrades: m.totalTrades ?? 0,
         metricsJson: m,
+        computedAt: Date.now(),
       });
 
       // Update tournament entry with final rank
-      await db
-        .update(tournamentEntries)
-        .set({ finalRank: i + 1 })
-        .where(
-          and(
-            eq(tournamentEntries.tournamentId, tournamentId),
-            eq(tournamentEntries.agentId, em.agentId),
-          ),
-        );
+      const te = await convex.query(api.tournamentEntries.getByTournamentAndAgent, {
+        tournamentId: tournamentId as any,
+        agentId: em.agentId as any,
+      });
+      if (te) {
+        await convex.mutation(api.tournamentEntries.update, { id: te._id, finalRank: i + 1 });
+      }
     }
 
     return entryMetrics.length;
   },
 
   async getLeaderboard(tournamentId: string, agentContext?: string) {
-    const entries = await db.query.leaderboardEntries.findMany({
-      where: eq(leaderboardEntries.tournamentId, tournamentId),
-      orderBy: [leaderboardEntries.rank],
-    });
+    const entries = await convex.query(api.leaderboardEntries.listByTournament, { tournamentId: tournamentId as any });
 
     const enriched = await Promise.all(
-      entries.map(async (entry) => {
-        const agent = await db.query.agents.findFirst({
-          where: eq(agents.id, entry.agentId),
-        });
+      entries.map(async (entry: any) => {
+        const agent = await convex.query(api.agents.get, { id: entry.agentId });
         return { ...entry, agentName: agent?.name || 'Unknown' };
       }),
     );
 
     if (agentContext) {
-      return enriched.map((e) => ({
+      return enriched.map((e: any) => ({
         rank: e.rank,
         agentId: e.agentId,
         agentName: e.agentName,
@@ -133,27 +108,18 @@ export const leaderboardService = {
   },
 
   async getAgentStanding(tournamentId: string, agentId: string) {
-    const allEntries = await db.query.leaderboardEntries.findMany({
-      where: eq(leaderboardEntries.tournamentId, tournamentId),
-      orderBy: [leaderboardEntries.rank],
-    });
+    const allEntries = await convex.query(api.leaderboardEntries.listByTournament, { tournamentId: tournamentId as any });
 
-    const agentEntry = allEntries.find((e) => e.agentId === agentId);
+    const agentEntry = allEntries.find((e: any) => e.agentId === agentId);
     if (!agentEntry) return null;
 
     const totalEntrants = allEntries.length;
     const rank = agentEntry.rank;
     const percentile = ((totalEntrants - rank) / totalEntrants) * 100;
 
-    // Compute field stats for comparison
     const metricKeys = [
-      'totalReturn',
-      'sharpeRatio',
-      'sortinoRatio',
-      'maxDrawdown',
-      'winRate',
-      'profitFactor',
-      'netProfit',
+      'totalReturn', 'sharpeRatio', 'sortinoRatio', 'maxDrawdown',
+      'winRate', 'profitFactor', 'netProfit',
     ] as const;
 
     const fieldStats: Record<string, { median: number; best: number; worst: number }> = {};
@@ -162,18 +128,17 @@ export const leaderboardService = {
 
     for (const key of metricKeys) {
       const values = allEntries
-        .map((e) => parseFloat(e[key] as string) || 0)
-        .sort((a, b) => a - b);
+        .map((e: any) => (e[key] as number) ?? 0)
+        .sort((a: number, b: number) => a - b);
 
       const median = values[Math.floor(values.length / 2)];
-      const best = key === 'maxDrawdown' ? Math.max(...values) : Math.max(...values);
-      const worst = key === 'maxDrawdown' ? Math.min(...values) : Math.min(...values);
+      const best = Math.max(...values);
+      const worst = Math.min(...values);
 
       fieldStats[key] = { median, best, worst };
 
-      const agentVal = parseFloat(agentEntry[key] as string) || 0;
+      const agentVal = (agentEntry as any)[key] ?? 0;
       if (key === 'maxDrawdown') {
-        // For drawdown, closer to 0 is better
         if (agentVal > median) relativeStrengths.push(`${key}: above median`);
         else if (agentVal < median) relativeWeaknesses.push(`${key}: below median`);
       } else {

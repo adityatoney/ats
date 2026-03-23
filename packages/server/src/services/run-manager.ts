@@ -1,42 +1,38 @@
-import { eq } from 'drizzle-orm';
-import { db } from '../lib/db';
-import { runs, strategyVersions, agents } from '@aegis/db/schema';
+import { convex } from '../lib/convex';
+import { api } from '../../../../convex/_generated/api';
 import { pythonClient } from '../lib/python-client';
 import { eventBus } from './event-bus';
 import { ensureDeterministicArtifacts } from './strategy-artifacts';
 
 export const runManager = {
   async startBacktest(agentId: string, config: Record<string, unknown>) {
-    const agent = await db.query.agents.findFirst({
-      where: eq(agents.id, agentId),
-    });
+    const agent = await convex.query(api.agents.get, { id: agentId as any });
     if (!agent) throw new Error('Agent not found');
 
-    const latestStrategy = await db.query.strategyVersions.findFirst({
-      where: eq(strategyVersions.agentId, agentId),
-      orderBy: (sv, { desc }) => [desc(sv.version)],
-    });
+    const latestStrategy = await convex.query(api.strategyVersions.getLatestByAgent, { agentId: agentId as any });
     if (!latestStrategy) throw new Error('No strategy version found');
     const runnableStrategy = await ensureDeterministicArtifacts(latestStrategy);
     if (!runnableStrategy.strategyPy) throw new Error('Strategy Python artifact is missing');
 
-    const [run] = await db
-      .insert(runs)
-      .values({
-        agentId,
-        strategyVersionId: runnableStrategy.id,
-        status: 'pending',
-        runType: 'backtest',
-        configJson: config,
-        totalBars: 0,
-        processedBars: 0,
-      })
-      .returning();
+    const run = await convex.mutation(api.runs.create, {
+      pgId: '',
+      agentId: agentId as any,
+      strategyVersionId: runnableStrategy._id as any,
+      status: 'pending',
+      runType: 'backtest',
+      configJson: config,
+      totalBars: 0,
+      processedBars: 0,
+    });
 
-    await db.update(agents).set({ status: 'backtesting' }).where(eq(agents.id, agentId));
+    await convex.mutation(api.agents.update, {
+      id: agentId as any,
+      status: 'backtesting',
+      updatedAt: Date.now(),
+    });
 
     await pythonClient.startRun({
-      runId: run.id,
+      runId: run!._id,
       agentId,
       sourceKind: runnableStrategy.sourceKind,
       strategyPy: runnableStrategy.strategyPy,
@@ -49,20 +45,24 @@ export const runManager = {
 
   async pauseRun(runId: string) {
     await pythonClient.pauseRun(runId);
-    await db.update(runs).set({ status: 'paused' }).where(eq(runs.id, runId));
+    await convex.mutation(api.runs.update, { id: runId as any, status: 'paused' });
   },
 
   async resumeRun(runId: string) {
     await pythonClient.resumeRun(runId);
-    await db.update(runs).set({ status: 'running' }).where(eq(runs.id, runId));
+    await convex.mutation(api.runs.update, { id: runId as any, status: 'running' });
   },
 
   async cancelRun(runId: string) {
     await pythonClient.cancelRun(runId);
-    await db.update(runs).set({ status: 'cancelled' }).where(eq(runs.id, runId));
-    const run = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
+    await convex.mutation(api.runs.update, { id: runId as any, status: 'cancelled' });
+    const run = await convex.query(api.runs.get, { id: runId as any });
     if (run) {
-      await db.update(agents).set({ status: 'cancelled' }).where(eq(agents.id, run.agentId));
+      await convex.mutation(api.agents.update, {
+        id: run.agentId,
+        status: 'cancelled',
+        updatedAt: Date.now(),
+      });
     }
   },
 

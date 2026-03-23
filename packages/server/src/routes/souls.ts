@@ -1,29 +1,22 @@
 import { Hono } from 'hono';
-import { eq, desc, and } from 'drizzle-orm';
-import { db } from '../lib/db';
-import { soulVersions } from '@aegis/db/schema';
+import { convex, normalize, normalizeAll } from '../lib/convex';
+import { api } from '../../../../convex/_generated/api';
 import { agentIsolation } from '../middleware/agent-isolation';
 
 export const soulRoutes = new Hono();
 
 soulRoutes.get('/agent/:agentId', agentIsolation('soul'), async (c) => {
   const agentId = c.req.param('agentId');
-  const activeSoul = await db.query.soulVersions.findFirst({
-    where: and(eq(soulVersions.agentId, agentId), eq(soulVersions.status, 'active')),
-    orderBy: [desc(soulVersions.version)],
-  });
+  const activeSoul = await convex.query(api.soulVersions.getActiveByAgent, { agentId: agentId as any });
   if (!activeSoul)
     return c.json({ error: { message: 'No active soul', code: 'NOT_FOUND' } }, 404);
-  return c.json({ data: activeSoul });
+  return c.json({ data: normalize(activeSoul) });
 });
 
 soulRoutes.get('/agent/:agentId/versions', agentIsolation('soul'), async (c) => {
   const agentId = c.req.param('agentId');
-  const versions = await db.query.soulVersions.findMany({
-    where: eq(soulVersions.agentId, agentId),
-    orderBy: [desc(soulVersions.version)],
-  });
-  return c.json({ data: versions });
+  const versions = await convex.query(api.soulVersions.listByAgent, { agentId: agentId as any });
+  return c.json({ data: normalizeAll(versions) });
 });
 
 soulRoutes.post('/agent/:agentId/:vid/approve', async (c) => {
@@ -31,18 +24,13 @@ soulRoutes.post('/agent/:agentId/:vid/approve', async (c) => {
   const vid = c.req.param('vid');
 
   // Supersede current active soul
-  const currentActive = await db.query.soulVersions.findFirst({
-    where: and(eq(soulVersions.agentId, agentId), eq(soulVersions.status, 'active')),
-  });
+  const currentActive = await convex.query(api.soulVersions.getActiveByAgent, { agentId: agentId as any });
   if (currentActive) {
-    await db
-      .update(soulVersions)
-      .set({ status: 'superseded' })
-      .where(eq(soulVersions.id, currentActive.id));
+    await convex.mutation(api.soulVersions.update, { id: currentActive._id, status: 'superseded' });
   }
 
   // Activate the new one
-  await db.update(soulVersions).set({ status: 'active' }).where(eq(soulVersions.id, vid));
+  await convex.mutation(api.soulVersions.update, { id: vid as any, status: 'active' });
 
   return c.json({ data: { status: 'active' } });
 });

@@ -1,12 +1,5 @@
-import { eq, and, sql } from 'drizzle-orm';
-import { db } from '../lib/db';
-import {
-  tournaments,
-  tournamentEntries,
-  runs,
-  agents,
-  strategyVersions,
-} from '@aegis/db/schema';
+import { convex } from '../lib/convex';
+import { api } from '../../../../convex/_generated/api';
 import { pythonClient } from '../lib/python-client';
 import { eventBus } from './event-bus';
 import { ensureDeterministicArtifacts } from './strategy-artifacts';
@@ -20,35 +13,28 @@ export const tournamentManager = {
   ) {
     // Validate all agents exist and have strategies
     for (const agentId of agentIds) {
-      const agent = await db.query.agents.findFirst({
-        where: eq(agents.id, agentId),
-      });
+      const agent = await convex.query(api.agents.get, { id: agentId as any });
       if (!agent) throw new Error(`Agent ${agentId} not found`);
 
-      const strategy = await db.query.strategyVersions.findFirst({
-        where: eq(strategyVersions.agentId, agentId),
-        orderBy: (sv, { desc }) => [desc(sv.version)],
-      });
+      const strategy = await convex.query(api.strategyVersions.getLatestByAgent, { agentId: agentId as any });
       if (!strategy) throw new Error(`Agent ${agentId} has no strategy`);
     }
 
-    const [tournament] = await db
-      .insert(tournaments)
-      .values({
-        projectId,
-        name,
-        configJson: config,
-        status: 'pending',
-        agentCount: agentIds.length,
-        completedCount: 0,
-      })
-      .returning();
+    const tournament = await convex.mutation(api.tournaments.create, {
+      pgId: '',
+      projectId: projectId as any,
+      name,
+      configJson: config,
+      status: 'pending',
+      agentCount: agentIds.length,
+      completedCount: 0,
+    });
 
-    // Create entries for each agent
     for (const agentId of agentIds) {
-      await db.insert(tournamentEntries).values({
-        tournamentId: tournament.id,
-        agentId,
+      await convex.mutation(api.tournamentEntries.create, {
+        pgId: '',
+        tournamentId: tournament!._id,
+        agentId: agentId as any,
         status: 'pending',
       });
     }
@@ -57,20 +43,15 @@ export const tournamentManager = {
   },
 
   async startTournament(tournamentId: string) {
-    const tournament = await db.query.tournaments.findFirst({
-      where: eq(tournaments.id, tournamentId),
-    });
+    const tournament = await convex.query(api.tournaments.get, { id: tournamentId as any });
     if (!tournament) throw new Error('Tournament not found');
     if (tournament.status !== 'pending')
       throw new Error(`Tournament is ${tournament.status}, cannot start`);
 
-    const entries = await db.query.tournamentEntries.findMany({
-      where: eq(tournamentEntries.tournamentId, tournamentId),
-    });
+    const entries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: tournamentId as any });
 
     const config = tournament.configJson as Record<string, unknown>;
 
-    // Pre-fetch data once
     const prefetchResult = await pythonClient.prefetchData({
       symbols: config.symbols as string[],
       startDate: config.startDate as string,
@@ -80,17 +61,13 @@ export const tournamentManager = {
 
     const dataSnapshotId = (prefetchResult as Record<string, unknown>).dataSnapshotId as string;
 
-    // Update tournament with data snapshot and status
-    await db
-      .update(tournaments)
-      .set({
-        status: 'in_progress',
-        dataSnapshotId,
-        startedAt: new Date(),
-      })
-      .where(eq(tournaments.id, tournamentId));
+    await convex.mutation(api.tournaments.update, {
+      id: tournamentId as any,
+      status: 'in_progress',
+      dataSnapshotId,
+      startedAt: Date.now(),
+    });
 
-    // Create runs for each agent
     const runsConfig: Array<{
       runId: string;
       agentId: string;
@@ -101,40 +78,39 @@ export const tournamentManager = {
     }> = [];
 
     for (const entry of entries) {
-      const latestStrategy = await db.query.strategyVersions.findFirst({
-        where: eq(strategyVersions.agentId, entry.agentId),
-        orderBy: (sv, { desc }) => [desc(sv.version)],
-      });
+      const latestStrategy = await convex.query(api.strategyVersions.getLatestByAgent, { agentId: entry.agentId });
       if (!latestStrategy) continue;
       const runnableStrategy = await ensureDeterministicArtifacts(latestStrategy);
       if (!runnableStrategy.strategyPy) {
         throw new Error(`Agent ${entry.agentId} is missing executable strategy Python`);
       }
 
-      const [run] = await db
-        .insert(runs)
-        .values({
-          agentId: entry.agentId,
-          strategyVersionId: runnableStrategy.id,
-          tournamentId,
-          status: 'pending',
-          runType: 'backtest',
-          configJson: config,
-          totalBars: 0,
-          processedBars: 0,
-        })
-        .returning();
+      const run = await convex.mutation(api.runs.create, {
+        pgId: '',
+        agentId: entry.agentId,
+        strategyVersionId: runnableStrategy._id as any,
+        tournamentId: tournamentId as any,
+        status: 'pending',
+        runType: 'backtest',
+        configJson: config,
+        totalBars: 0,
+        processedBars: 0,
+      });
 
-      // Link entry to run
-      await db
-        .update(tournamentEntries)
-        .set({ runId: run.id, status: 'running' })
-        .where(eq(tournamentEntries.id, entry.id));
+      await convex.mutation(api.tournamentEntries.update, {
+        id: entry._id,
+        runId: run!._id,
+        status: 'running',
+      });
 
-      await db.update(agents).set({ status: 'backtesting' }).where(eq(agents.id, entry.agentId));
+      await convex.mutation(api.agents.update, {
+        id: entry.agentId,
+        status: 'backtesting',
+        updatedAt: Date.now(),
+      });
 
       runsConfig.push({
-        runId: run.id,
+        runId: run!._id,
         agentId: entry.agentId,
         sourceKind: runnableStrategy.sourceKind,
         strategyPy: runnableStrategy.strategyPy,
@@ -143,7 +119,6 @@ export const tournamentManager = {
       });
     }
 
-    // Start all runs concurrently via Python
     await pythonClient.startTournament({
       tournamentId,
       runs: runsConfig,
@@ -159,26 +134,15 @@ export const tournamentManager = {
   },
 
   async handleRunCompleted(runId: string, tournamentId: string) {
-    // Update the tournament entry
-    await db
-      .update(tournamentEntries)
-      .set({ status: 'completed' })
-      .where(
-        and(eq(tournamentEntries.tournamentId, tournamentId), eq(tournamentEntries.runId, runId)),
-      );
+    // Find and update the tournament entry
+    const entries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: tournamentId as any });
+    const entry = entries.find((e: any) => e.runId === runId);
+    if (entry) {
+      await convex.mutation(api.tournamentEntries.update, { id: entry._id, status: 'completed' });
+    }
 
     // Increment completed count atomically
-    await db
-      .update(tournaments)
-      .set({
-        completedCount: sql`${tournaments.completedCount} + 1`,
-      })
-      .where(eq(tournaments.id, tournamentId));
-
-    // Check if all runs done
-    const tournament = await db.query.tournaments.findFirst({
-      where: eq(tournaments.id, tournamentId),
-    });
+    const tournament = await convex.mutation(api.tournaments.incrementCompleted, { id: tournamentId as any });
 
     if (tournament && tournament.completedCount >= tournament.agentCount) {
       await this.finalizeTournament(tournamentId);
@@ -194,38 +158,24 @@ export const tournamentManager = {
   },
 
   async handleRunFailed(runId: string, tournamentId: string) {
-    await db
-      .update(tournamentEntries)
-      .set({ status: 'failed' })
-      .where(
-        and(eq(tournamentEntries.tournamentId, tournamentId), eq(tournamentEntries.runId, runId)),
-      );
+    const entries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: tournamentId as any });
+    const entry = entries.find((e: any) => e.runId === runId);
+    if (entry) {
+      await convex.mutation(api.tournamentEntries.update, { id: entry._id, status: 'failed' });
+    }
 
-    await db
-      .update(tournaments)
-      .set({
-        completedCount: sql`${tournaments.completedCount} + 1`,
-      })
-      .where(eq(tournaments.id, tournamentId));
-
-    const tournament = await db.query.tournaments.findFirst({
-      where: eq(tournaments.id, tournamentId),
-    });
+    const tournament = await convex.mutation(api.tournaments.incrementCompleted, { id: tournamentId as any });
 
     if (tournament && tournament.completedCount >= tournament.agentCount) {
-      // Check if any succeeded
-      const completedEntries = await db.query.tournamentEntries.findMany({
-        where: and(
-          eq(tournamentEntries.tournamentId, tournamentId),
-          eq(tournamentEntries.status, 'completed'),
-        ),
-      });
+      const updatedEntries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: tournamentId as any });
+      const completedEntries = updatedEntries.filter((e: any) => e.status === 'completed');
 
       if (completedEntries.length === 0) {
-        await db
-          .update(tournaments)
-          .set({ status: 'failed', completedAt: new Date() })
-          .where(eq(tournaments.id, tournamentId));
+        await convex.mutation(api.tournaments.update, {
+          id: tournamentId as any,
+          status: 'failed',
+          completedAt: Date.now(),
+        });
 
         eventBus.publishTournament(tournamentId, {
           eventType: 'tournament.failed',
@@ -238,24 +188,19 @@ export const tournamentManager = {
   },
 
   async finalizeTournament(tournamentId: string) {
-    // Import leaderboard service lazily to avoid circular deps
     const { leaderboardService } = await import('./leaderboard-service');
     await leaderboardService.computeLeaderboard(tournamentId);
 
-    // Check for any failed entries
-    const failedEntries = await db.query.tournamentEntries.findMany({
-      where: and(
-        eq(tournamentEntries.tournamentId, tournamentId),
-        eq(tournamentEntries.status, 'failed'),
-      ),
-    });
+    const entries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: tournamentId as any });
+    const failedEntries = entries.filter((e: any) => e.status === 'failed');
 
     const finalStatus = failedEntries.length > 0 ? 'partially_failed' : 'completed';
 
-    await db
-      .update(tournaments)
-      .set({ status: finalStatus, completedAt: new Date() })
-      .where(eq(tournaments.id, tournamentId));
+    await convex.mutation(api.tournaments.update, {
+      id: tournamentId as any,
+      status: finalStatus,
+      completedAt: Date.now(),
+    });
 
     eventBus.publishTournament(tournamentId, {
       eventType: 'tournament.completed',
@@ -264,39 +209,35 @@ export const tournamentManager = {
   },
 
   async cancelTournament(tournamentId: string) {
-    const tournament = await db.query.tournaments.findFirst({
-      where: eq(tournaments.id, tournamentId),
-    });
+    const tournament = await convex.query(api.tournaments.get, { id: tournamentId as any });
     if (!tournament) throw new Error('Tournament not found');
 
-    const entries = await db.query.tournamentEntries.findMany({
-      where: eq(tournamentEntries.tournamentId, tournamentId),
-    });
+    const entries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: tournamentId as any });
 
-    // Cancel all running runs
     for (const entry of entries) {
       if (entry.runId && entry.status === 'running') {
         try {
           await pythonClient.cancelRun(entry.runId);
-          await db.update(runs).set({ status: 'cancelled' }).where(eq(runs.id, entry.runId));
+          await convex.mutation(api.runs.update, { id: entry.runId, status: 'cancelled' });
         } catch {
           // Best effort cancellation
         }
-        await db
-          .update(tournamentEntries)
-          .set({ status: 'failed' })
-          .where(eq(tournamentEntries.id, entry.id));
+        await convex.mutation(api.tournamentEntries.update, { id: entry._id, status: 'failed' });
       }
     }
 
-    await db
-      .update(tournaments)
-      .set({ status: 'cancelled', completedAt: new Date() })
-      .where(eq(tournaments.id, tournamentId));
+    await convex.mutation(api.tournaments.update, {
+      id: tournamentId as any,
+      status: 'cancelled',
+      completedAt: Date.now(),
+    });
 
-    // Reset agent statuses
     for (const entry of entries) {
-      await db.update(agents).set({ status: 'idle' }).where(eq(agents.id, entry.agentId));
+      await convex.mutation(api.agents.update, {
+        id: entry.agentId,
+        status: 'idle',
+        updatedAt: Date.now(),
+      });
     }
 
     eventBus.publishTournament(tournamentId, {
