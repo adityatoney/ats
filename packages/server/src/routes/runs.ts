@@ -7,6 +7,21 @@ import { deleteRun } from '../services/delete-service';
 
 export const runRoutes = new Hono();
 
+function normalizePortfolioSnapshotFromEvent(event: Record<string, unknown>) {
+  const payload = (event.payload as Record<string, unknown> | undefined) ?? {};
+  return {
+    id: event.id,
+    runId: event.runId,
+    barIndex: (payload.barIndex as number | undefined) ?? 0,
+    timestampSimulated: payload.timestampSimulated ?? null,
+    cash: (payload.cash as number | undefined) ?? 0,
+    equity: (payload.equity as number | undefined) ?? 0,
+    positionsJson: (payload.positionsJson as Record<string, unknown> | undefined) ?? {},
+    drawdown: (payload.drawdown as number | undefined) ?? 0,
+    highWaterMark: (payload.highWaterMark as number | undefined) ?? 0,
+  };
+}
+
 runRoutes.delete('/:id', async (c) => {
   const id = c.req.param('id');
   try {
@@ -86,7 +101,32 @@ runRoutes.get('/:id/orders', agentIsolation('run'), async (c) => {
 runRoutes.get('/:id/portfolio', agentIsolation('run'), async (c) => {
   const id = c.req.param('id');
   const snapshots = await convex.query(api.portfolioSnapshots.listByRun, { runId: id as any });
-  return c.json({ data: normalizeAll(snapshots) });
+  const normalizedSnapshots = normalizeAll(snapshots);
+
+  if (normalizedSnapshots.length > 1) {
+    return c.json({ data: normalizedSnapshots });
+  }
+
+  const run = await convex.query(api.runs.get, { id: id as any });
+  const events = await convex.query(api.agentEvents.listByRun, { runId: id as any });
+  const reconstructedSnapshots = normalizeAll(events)
+    .filter((event) => event.eventType === 'run.progress')
+    .map((event) => normalizePortfolioSnapshotFromEvent(event as Record<string, unknown>))
+    .sort((a, b) => (a.barIndex as number) - (b.barIndex as number));
+
+  if (reconstructedSnapshots.length > normalizedSnapshots.length) {
+    return c.json({ data: reconstructedSnapshots });
+  }
+
+  if (
+    normalizedSnapshots.length === 1
+    && run?.status === 'completed'
+    && reconstructedSnapshots.length === 0
+  ) {
+    return c.json({ data: normalizedSnapshots });
+  }
+
+  return c.json({ data: normalizedSnapshots });
 });
 
 runRoutes.get('/:id/checkpoints', async (c) => {

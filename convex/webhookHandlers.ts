@@ -22,7 +22,11 @@ function shouldPersistProgressSnapshot(
     return false;
   }
 
-  return processedBars >= totalBars || processedBars % SNAPSHOT_INTERVAL_BARS === 0;
+  return (
+    processedBars >= totalBars ||
+    processedBars === 1 ||
+    (processedBars - 1) % SNAPSHOT_INTERVAL_BARS === 0
+  );
 }
 
 function shouldPersistRunProgress(
@@ -33,7 +37,11 @@ function shouldPersistRunProgress(
     return false;
   }
 
-  return processedBars >= totalBars || processedBars % RUN_PROGRESS_INTERVAL_BARS === 0;
+  return (
+    processedBars >= totalBars ||
+    processedBars === 1 ||
+    (processedBars - 1) % RUN_PROGRESS_INTERVAL_BARS === 0
+  );
 }
 
 function withoutUndefined<T extends Record<string, unknown>>(value: T): T {
