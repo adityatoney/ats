@@ -3,6 +3,8 @@ import { api } from '../../../../convex/_generated/api';
 import { pythonClient } from '../lib/python-client';
 import { eventBus } from './event-bus';
 import { ensureDeterministicArtifacts } from './strategy-artifacts';
+import { tournamentLiveProgress } from './tournament-live-progress';
+import { fetchTournamentView } from './tournament-progress';
 
 export const tournamentManager = {
   async createTournament(
@@ -119,6 +121,12 @@ export const tournamentManager = {
       });
     }
 
+    tournamentLiveProgress.registerTournament(
+      tournamentId,
+      entries.length,
+      runsConfig.map((run) => run.runId),
+    );
+
     await pythonClient.startTournament({
       tournamentId,
       runs: runsConfig,
@@ -127,7 +135,14 @@ export const tournamentManager = {
 
     eventBus.publishTournament(tournamentId, {
       eventType: 'tournament.started',
-      payload: { agentCount: entries.length },
+      payload: {
+        processedBars: 0,
+        totalBars: 0,
+        completedAgents: 0,
+        activeAgents: entries.length,
+        agentCount: entries.length,
+        progressPercent: 0,
+      },
     });
 
     return { tournamentId, runsStarted: runsConfig.length };
@@ -193,8 +208,14 @@ export const tournamentManager = {
 
     const entries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: tournamentId as any });
     const failedEntries = entries.filter((e: any) => e.status === 'failed');
+    const completedEntries = entries.filter((e: any) => e.status === 'completed');
 
-    const finalStatus = failedEntries.length > 0 ? 'partially_failed' : 'completed';
+    const finalStatus =
+      completedEntries.length === 0 && failedEntries.length > 0
+        ? 'failed'
+        : failedEntries.length > 0
+          ? 'partially_failed'
+          : 'completed';
 
     await convex.mutation(api.tournaments.update, {
       id: tournamentId as any,
@@ -202,10 +223,24 @@ export const tournamentManager = {
       completedAt: Date.now(),
     });
 
+    const tournamentView = await fetchTournamentView(tournamentId);
+
     eventBus.publishTournament(tournamentId, {
-      eventType: 'tournament.completed',
-      payload: { status: finalStatus },
+      eventType: finalStatus === 'failed' ? 'tournament.failed' : 'tournament.completed',
+      payload: tournamentView
+        ? {
+            status: finalStatus,
+            processedBars: tournamentView.progressSummary.processedBars,
+            totalBars: tournamentView.progressSummary.totalBars,
+            completedAgents: tournamentView.progressSummary.completedAgents,
+            activeAgents: tournamentView.progressSummary.activeAgents,
+            agentCount: tournamentView.agentCount,
+            progressPercent: 100,
+          }
+        : { status: finalStatus, progressPercent: 100 },
     });
+
+    tournamentLiveProgress.clearTournament(tournamentId);
   },
 
   async cancelTournament(tournamentId: string) {
@@ -244,5 +279,7 @@ export const tournamentManager = {
       eventType: 'tournament.cancelled',
       payload: {},
     });
+
+    tournamentLiveProgress.clearTournament(tournamentId);
   },
 };

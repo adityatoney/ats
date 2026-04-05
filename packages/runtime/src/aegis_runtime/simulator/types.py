@@ -46,6 +46,7 @@ class RiskDecision:
 
 @dataclass
 class ProposedOrder:
+    client_order_id: str
     symbol: str
     side: Side
     order_type: OrderType

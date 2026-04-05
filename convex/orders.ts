@@ -39,10 +39,23 @@ export const findPendingOrder = query({
   },
 });
 
+export const getByRunAndClientOrderId = query({
+  args: { runId: v.id("runs"), clientOrderId: v.string() },
+  handler: async (ctx, { runId, clientOrderId }) => {
+    return await ctx.db
+      .query("orders")
+      .withIndex("by_runId_and_clientOrderId", (q) =>
+        q.eq("runId", runId).eq("clientOrderId", clientOrderId)
+      )
+      .unique();
+  },
+});
+
 export const create = mutation({
   args: {
     pgId: v.string(),
     runId: v.id("runs"),
+    clientOrderId: v.optional(v.string()),
     symbol: v.string(),
     side: v.string(),
     orderType: v.string(),
@@ -66,6 +79,7 @@ export const update = mutation({
     status: v.optional(v.string()),
     barIndex: v.optional(v.float64()),
     filledAtSim: v.optional(v.float64()),
+    clientOrderId: v.optional(v.string()),
   },
   handler: async (ctx, { id, ...patch }) => {
     const clean = Object.fromEntries(Object.entries(patch).filter(([_, v]) => v !== undefined));

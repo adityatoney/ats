@@ -5,6 +5,7 @@ export const leaderboardService = {
   async computeLeaderboard(tournamentId: string, rankingMetric = 'sharpeRatio') {
     const entries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: tournamentId as any });
     const completedEntries = entries.filter((e: any) => e.status === 'completed');
+    const entriesByAgentId = new Map(completedEntries.map((entry: any) => [entry.agentId, entry]));
 
     const entryMetrics: Array<{
       agentId: string;
@@ -12,9 +13,17 @@ export const leaderboardService = {
       metrics: Record<string, number>;
     }> = [];
 
-    for (const entry of completedEntries) {
+    const runs = await Promise.all(
+      completedEntries
+        .filter((entry: any) => !!entry.runId)
+        .map(async (entry: any) => ({
+          entry,
+          run: await convex.query(api.runs.get, { id: entry.runId }),
+        })),
+    );
+
+    for (const { entry, run } of runs) {
       if (!entry.runId) continue;
-      const run = await convex.query(api.runs.get, { id: entry.runId });
       if (!run?.metricsJson) continue;
 
       entryMetrics.push({
@@ -66,10 +75,7 @@ export const leaderboardService = {
       });
 
       // Update tournament entry with final rank
-      const te = await convex.query(api.tournamentEntries.getByTournamentAndAgent, {
-        tournamentId: tournamentId as any,
-        agentId: em.agentId as any,
-      });
+      const te = entriesByAgentId.get(em.agentId);
       if (te) {
         await convex.mutation(api.tournamentEntries.update, { id: te._id, finalRank: i + 1 });
       }

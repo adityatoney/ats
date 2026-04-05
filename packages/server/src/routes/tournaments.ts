@@ -3,8 +3,21 @@ import { convex, normalize, normalizeAll } from '../lib/convex';
 import { api } from '../../../../convex/_generated/api';
 import { tournamentManager } from '../services/tournament-manager';
 import { deleteTournament } from '../services/delete-service';
+import { fetchTournamentView } from '../services/tournament-progress';
 
 export const tournamentRoutes = new Hono();
+
+export function getTournamentRecency(tournament: Record<string, unknown>): number {
+  const candidates = [tournament.completedAt, tournament.startedAt, tournament._creationTime, tournament.createdAt];
+  for (const value of candidates) {
+    if (typeof value === 'number') return value;
+    if (typeof value === 'string') {
+      const parsed = new Date(value).getTime();
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+  }
+  return 0;
+}
 
 tournamentRoutes.delete('/:id', async (c) => {
   const id = c.req.param('id');
@@ -38,31 +51,18 @@ tournamentRoutes.get('/', async (c) => {
   const allTournaments = projectId
     ? await convex.query(api.tournaments.listByProject, { projectId: projectId as any })
     : await convex.query(api.tournaments.list, {});
-  return c.json({ data: normalizeAll(allTournaments) });
+  const normalized = normalizeAll(allTournaments).sort(
+    (a, b) => getTournamentRecency(b as Record<string, unknown>) - getTournamentRecency(a as Record<string, unknown>),
+  );
+  return c.json({ data: normalized });
 });
 
 tournamentRoutes.get('/:id', async (c) => {
   const id = c.req.param('id');
-  const tournament = await convex.query(api.tournaments.get, { id: id as any });
-  if (!tournament) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
+  const tournamentView = await fetchTournamentView(id);
+  if (!tournamentView) return c.json({ error: { message: 'Not found', code: 'NOT_FOUND' } }, 404);
 
-  const entries = await convex.query(api.tournamentEntries.listByTournament, { tournamentId: id as any });
-
-  const enrichedEntries = await Promise.all(
-    entries.map(async (entry: any) => {
-      const agent = await convex.query(api.agents.get, { id: entry.agentId as any });
-      const run = entry.runId
-        ? await convex.query(api.runs.get, { id: entry.runId as any })
-        : null;
-      return {
-        ...normalize(entry),
-        agentName: agent?.name || 'Unknown',
-        run: run ? normalize(run) : null,
-      };
-    }),
-  );
-
-  return c.json({ data: { ...normalize(tournament), entries: enrichedEntries } });
+  return c.json({ data: tournamentView });
 });
 
 tournamentRoutes.post('/:id/start', async (c) => {

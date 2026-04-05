@@ -1,6 +1,7 @@
 import { convex } from '../lib/convex';
 import { api } from '../../../../convex/_generated/api';
 import { eventBus } from './event-bus';
+import { tournamentLiveProgress } from './tournament-live-progress';
 
 interface QueuedEvent {
   runId: string;
@@ -8,8 +9,9 @@ interface QueuedEvent {
   payload: Record<string, unknown>;
 }
 
-const MAX_BATCH_SIZE = 100;
-const FLUSH_INTERVAL_MS = 200;
+const MAX_BATCH_SIZE = 50;
+const FLUSH_INTERVAL_MS = 50;
+const MAX_PAYLOAD_BYTES = 30_000; // ~30 KB per event payload max
 const AGENT_EVENTS_BATCH_SIZE = 2000; // Convex supports up to 16k writes/txn — 2000 is safe with headroom
 
 const PRIORITY_EVENTS = new Set([
@@ -21,6 +23,31 @@ const PRIORITY_EVENTS = new Set([
   'branch.completed',
 ]);
 
+/**
+ * Estimate JSON byte size of an event payload (approximate, avoids full serialization).
+ */
+function estimateEventSize(event: QueuedEvent): number {
+  // Quick estimate: JSON.stringify the payload
+  try {
+    return JSON.stringify(event.payload).length;
+  } catch {
+    return 1000; // fallback
+  }
+}
+
+/**
+ * Truncate checkpoint state blobs that are individually too large.
+ */
+function sanitizePayload(event: QueuedEvent): QueuedEvent {
+  if (event.eventType === 'checkpoint.saved' && event.payload.state) {
+    const stateStr = JSON.stringify(event.payload.state);
+    if (stateStr.length > MAX_PAYLOAD_BYTES) {
+      return { ...event, payload: { ...event.payload, state: { __truncated: true, originalSize: stateStr.length } } };
+    }
+  }
+  return event;
+}
+
 class WriteQueue {
   private buffer: QueuedEvent[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -30,6 +57,19 @@ class WriteQueue {
   private eventLogs = new Map<string, QueuedEvent[]>();
 
   enqueue(event: QueuedEvent): void {
+    const shouldFlushNow = this.pushEvent(event);
+    this.scheduleFlush(shouldFlushNow);
+  }
+
+  enqueueBatch(events: QueuedEvent[]): void {
+    let shouldFlushNow = false;
+    for (const event of events) {
+      shouldFlushNow = this.pushEvent(event) || shouldFlushNow;
+    }
+    this.scheduleFlush(shouldFlushNow);
+  }
+
+  private pushEvent(event: QueuedEvent): boolean {
     this.buffer.push(event);
 
     // Accumulate event for deferred agentEvents write (skip signal.generated)
@@ -40,16 +80,14 @@ class WriteQueue {
       this.eventLogs.get(event.runId)!.push(event);
     }
 
-    if (PRIORITY_EVENTS.has(event.eventType)) {
+    return PRIORITY_EVENTS.has(event.eventType) || this.buffer.length >= MAX_BATCH_SIZE;
+  }
+
+  private scheduleFlush(shouldFlushNow: boolean): void {
+    if (shouldFlushNow) {
       this.flush();
       return;
     }
-
-    if (this.buffer.length >= MAX_BATCH_SIZE) {
-      this.flush();
-      return;
-    }
-
     if (!this.flushTimer) {
       this.flushTimer = setTimeout(() => this.flush(), FLUSH_INTERVAL_MS);
     }
@@ -63,39 +101,67 @@ class WriteQueue {
     if (this.buffer.length === 0 || this.flushing) return;
 
     this.flushing = true;
-    const batch = this.buffer.splice(0, MAX_BATCH_SIZE);
+
+    // Build a batch that fits under Convex's 1 MiB arg limit.
+    // Use 900 KB as threshold to leave headroom for JSON overhead.
+    const MAX_BATCH_BYTES = 900_000;
+    const batch: QueuedEvent[] = [];
+    let batchBytes = 0;
+    while (this.buffer.length > 0 && batch.length < MAX_BATCH_SIZE) {
+      const event = sanitizePayload(this.buffer[0]);
+      const eventSize = estimateEventSize(event);
+      if (batch.length > 0 && batchBytes + eventSize > MAX_BATCH_BYTES) {
+        break; // Adding this event would exceed the limit
+      }
+      this.buffer.shift();
+      batch.push(event);
+      batchBytes += eventSize;
+    }
 
     try {
       const results = await convex.mutation(
         api.webhookHandlers.processBatch,
         {
-          events: batch.map((e) => ({
-            runId: e.runId,
-            eventType: e.eventType,
-            payload: e.payload,
-          })),
+          events: batch.map((e) => {
+            const safe = sanitizePayload(e);
+            return {
+              runId: safe.runId,
+              eventType: safe.eventType,
+              payload: safe.payload,
+            };
+          }),
         }
       );
 
       // Handle terminal events — tournament callbacks + deferred agentEvents bulk write
       if (results && Array.isArray(results)) {
+        const tournamentIdsToFinalize = new Set<string>();
+        const terminalRunIds = new Set<string>();
+
         for (const result of results) {
-          const matchingEvent = batch.find((e) => e.eventType === result.eventType);
-          const runId = matchingEvent?.runId;
-
-          if (result.tournamentId && runId) {
-            const { tournamentManager } = await import('./tournament-manager');
-            if (result.eventType === 'run.completed') {
-              await tournamentManager.handleRunCompleted(runId, result.tournamentId);
-            } else if (result.eventType === 'run.failed') {
-              await tournamentManager.handleRunFailed(runId, result.tournamentId);
-            }
+          if (result.runId && (result.eventType === 'run.completed' || result.eventType === 'run.failed')) {
+            terminalRunIds.add(result.runId);
           }
 
-          // Bulk-write accumulated agentEvents for this run (fire-and-forget from browser perspective)
-          if (runId && (result.eventType === 'run.completed' || result.eventType === 'run.failed')) {
-            this.bulkWriteAgentEvents(runId);
+          if (result.tournamentIdToFinalize) {
+            tournamentIdsToFinalize.add(result.tournamentIdToFinalize);
+          } else if (
+            result.tournamentId &&
+            (result.eventType === 'run.completed' || result.eventType === 'run.failed')
+          ) {
+            await tournamentLiveProgress.handlePersistenceTerminalResult(result);
           }
+        }
+
+        if (tournamentIdsToFinalize.size > 0) {
+          const { tournamentManager } = await import('./tournament-manager');
+          for (const tournamentId of tournamentIdsToFinalize) {
+            await tournamentManager.finalizeTournament(tournamentId);
+          }
+        }
+
+        for (const runId of terminalRunIds) {
+          this.bulkWriteAgentEvents(runId);
         }
       }
     } catch (err) {
@@ -133,17 +199,17 @@ class WriteQueue {
       chunks.push(events.slice(i, i + AGENT_EVENTS_BATCH_SIZE));
     }
 
-    Promise.all(
-      chunks.map((chunk) =>
-        convex.mutation(api.webhookHandlers.bulkInsertAgentEvents, {
+    (async () => {
+      for (const chunk of chunks) {
+        await convex.mutation(api.webhookHandlers.bulkInsertAgentEvents, {
           events: chunk.map((e) => ({
             runId: e.runId,
             eventType: e.eventType,
             payload: e.payload,
           })),
-        })
-      )
-    )
+        });
+      }
+    })()
       .then(() => console.log(`Saved ${events.length} agentEvents for run ${runId} (${chunks.length} chunks)`))
       .catch((err) => console.error(`Failed to bulk-write agentEvents for run ${runId}:`, err));
   }

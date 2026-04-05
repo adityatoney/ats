@@ -62,6 +62,7 @@ class Engine:
         self.snapshots: list[dict[str, Any]] = []
         self.bar_index = 0
         self.event_count = 0
+        self._order_sequence = 0
 
         self._paused = False
         self._cancelled = False
@@ -102,6 +103,10 @@ class Engine:
         self.event_count += 1
         if self.event_callback:
             await self.event_callback(self.run_id, event_type, payload)
+
+    def _next_client_order_id(self) -> str:
+        self._order_sequence += 1
+        return f"{self.run_id}:{self._order_sequence}"
 
     def _get_total_bars(self) -> int:
         if not self._prepared_data:
@@ -173,6 +178,7 @@ class Engine:
                                     fee,
                                 )
                                 fill_record = {
+                                    "client_order_id": order.client_order_id,
                                     "symbol": order.symbol,
                                     "side": order.side.value,
                                     "order_type": order.order_type.value,
@@ -244,6 +250,7 @@ class Engine:
                         if order_qty > 0 and order_side_str in ("buy", "sell"):
                             side = Side.BUY if order_side_str == "buy" else Side.SELL
                             order = ProposedOrder(
+                                client_order_id=self._next_client_order_id(),
                                 symbol=signal.symbol,
                                 side=side,
                                 order_type=OrderType.MARKET,
@@ -270,6 +277,7 @@ class Engine:
                             if risk.approved:
                                 self.pending_orders.append(order)
                                 order_record = {
+                                    "client_order_id": order.client_order_id,
                                     "symbol": order.symbol,
                                     "side": order.side.value,
                                     "order_type": order.order_type.value,
@@ -330,6 +338,7 @@ class Engine:
                     self.portfolio.apply_fill(symbol, "sell", qty, close_price, fee)
 
                     fill_record = {
+                        "client_order_id": self._next_client_order_id(),
                         "symbol": symbol,
                         "side": "sell",
                         "order_type": "market",
@@ -378,6 +387,7 @@ class Engine:
             "portfolio": self.portfolio.to_dict(),
             "pending_orders": [
                 {
+                    "client_order_id": o.client_order_id,
                     "symbol": o.symbol,
                     "side": o.side.value,
                     "order_type": o.order_type.value,
@@ -389,6 +399,7 @@ class Engine:
             ],
             "rng_state": list(self.rng.getstate()[1]),
             "event_count": self.event_count,
+            "order_sequence": self._order_sequence,
             "strategy_state": (
                 self.strategy.get_runtime_state()
                 if self.strategy and hasattr(self.strategy, "get_runtime_state")
@@ -426,6 +437,7 @@ class Engine:
         # Restore pending orders
         engine.pending_orders = [
             ProposedOrder(
+                client_order_id=o["client_order_id"],
                 symbol=o["symbol"],
                 side=Side(o["side"]),
                 order_type=OrderType(o["order_type"]),
@@ -438,6 +450,7 @@ class Engine:
 
         engine.bar_index = state["bar_index"]
         engine.event_count = state.get("event_count", 0)
+        engine._order_sequence = state.get("order_sequence", 0)
         if strategy and hasattr(strategy, "set_runtime_state"):
             strategy.set_runtime_state(state.get("strategy_state"))
 

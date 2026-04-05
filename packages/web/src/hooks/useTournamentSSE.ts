@@ -7,7 +7,8 @@ export interface TournamentSSEEvent {
 }
 
 export function useTournamentSSE(tournamentId: string | undefined) {
-  const [events, setEvents] = useState<TournamentSSEEvent[]>([]);
+  const [latestEvent, setLatestEvent] = useState<TournamentSSEEvent | null>(null);
+  const [eventVersion, setEventVersion] = useState(0);
   const [connected, setConnected] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -30,7 +31,8 @@ export function useTournamentSSE(tournamentId: string | undefined) {
     for (const eventType of eventTypes) {
       es.addEventListener(eventType, (e) => {
         const data = JSON.parse(e.data);
-        setEvents((prev) => [...prev, { type: eventType, data, tournamentId }]);
+        setLatestEvent({ type: eventType, data, tournamentId });
+        setEventVersion((prev) => prev + 1);
       });
     }
 
@@ -47,8 +49,9 @@ export function useTournamentSSE(tournamentId: string | undefined) {
       es?.close();
       eventSourceRef.current = null;
       setConnected(false);
+      setLatestEvent(null);
     };
   }, [connect]);
 
-  return { events, connected, clearEvents: () => setEvents([]) };
+  return { latestEvent, connected, eventVersion };
 }

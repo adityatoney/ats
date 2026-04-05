@@ -79,6 +79,7 @@ export default defineSchema({
   orders: defineTable({
     pgId: v.string(),
     runId: v.id("runs"),
+    clientOrderId: v.optional(v.string()),
     symbol: v.string(),
     side: v.string(),
     orderType: v.string(),
@@ -92,7 +93,8 @@ export default defineSchema({
   })
     .index("by_pgId", ["pgId"])
     .index("by_runId", ["runId"])
-    .index("by_runId_status", ["runId", "status"]),
+    .index("by_runId_and_status", ["runId", "status"])
+    .index("by_runId_and_clientOrderId", ["runId", "clientOrderId"]),
 
   fills: defineTable({
     pgId: v.string(),
