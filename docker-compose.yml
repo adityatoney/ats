@@ -5,7 +5,7 @@ services:
       dockerfile: packages/server/Dockerfile
     container_name: aegis-server
     ports:
-      - "3001:3001"
+      - "${ATS_PORT_SERVER:-10111}:3001"
     environment:
       CONVEX_URL: ${CONVEX_URL}
       PORT: "3001"
@@ -23,14 +23,14 @@ services:
       dockerfile: packages/runtime/Dockerfile
     container_name: aegis-runtime
     ports:
-      - "8000:8000"
+      - "${ATS_PORT_RUNTIME:-10112}:8000"
     environment:
       NODE_SERVER_URL: http://server:3001
       ALPACA_API_KEY: ${ALPACA_API_KEY}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
-      - aegis_data:/app/data
+      - ${SSD_DATA}/ats/aegis:/app/data
     depends_on:
       server:
         condition: service_healthy
@@ -42,6 +42,7 @@ services:
       start_period: 10s
 
   web:
+    profiles: [prod]
     build:
       context: .
       dockerfile: packages/web/Dockerfile
@@ -49,10 +50,7 @@ services:
         VITE_CONVEX_URL: ${CONVEX_URL}
     container_name: aegis-web
     ports:
-      - "5173:5173"
+      - "${ATS_PORT_WEB:-10113}:5173"
     depends_on:
       server:
         condition: service_healthy
-
-volumes:
-  aegis_data:
