@@ -1,4 +1,52 @@
 services:
+  # ── Convex Backend ──────────────────────────────────────────────────────────
+  convexDB-backend:
+    image: ghcr.io/get-convex/convex-backend:latest
+    container_name: aegis-convexDB-backend
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    # Override entrypoint to patch the hardcoded internal ports (3210/3211)
+    # so they match the host-side ports. This lets localhost:<port> work from
+    # INSIDE the container (needed for internal URL resolution).
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        sed -i "s/--port 3210/--port $${ATS_PORT_CONVEX:-10110}/;s/--site-proxy-port 3211/--site-proxy-port $${ATS_PORT_SITE_PROXY:-10115}/" ./run_backend.sh
+        exec ./run_backend.sh
+    ports:
+      - "${ATS_PORT_CONVEX:-10110}:${ATS_PORT_CONVEX:-10110}"
+      - "${ATS_PORT_SITE_PROXY:-10115}:${ATS_PORT_SITE_PROXY:-10115}"
+    volumes:
+      - ${SSD_DATA}/ats/convex:/convex/data
+    environment:
+      - PORT=${ATS_PORT_CONVEX:-10110}
+      - SITE_PROXY_PORT=${ATS_PORT_SITE_PROXY:-10115}
+      - CONVEX_CLOUD_ORIGIN=${CONVEX_CLOUD_ORIGIN:-http://localhost:${ATS_PORT_CONVEX:-10110}}
+      - CONVEX_SITE_ORIGIN=${CONVEX_SITE_ORIGIN:-http://localhost:${ATS_PORT_SITE_PROXY:-10115}}
+      - DISABLE_METRICS_ENDPOINT=${DISABLE_METRICS_ENDPOINT:-true}
+      - DOCUMENT_RETENTION_DELAY=${DOCUMENT_RETENTION_DELAY:-172800}
+      - DO_NOT_REQUIRE_SSL
+      - RUST_LOG=${RUST_LOG:-info}
+    healthcheck:
+      test: curl -f http://localhost:${ATS_PORT_CONVEX:-10110}/version
+      interval: 5s
+      start_period: 10s
+
+  # ── Convex Dashboard ────────────────────────────────────────────────────────
+  convexDB-dashboard:
+    image: ghcr.io/get-convex/convex-dashboard:latest
+    container_name: aegis-convexDB-dashboard
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    ports:
+      - "${ATS_PORT_DASHBOARD:-10117}:6791"
+    environment:
+      - NEXT_PUBLIC_DEPLOYMENT_URL=${NEXT_PUBLIC_DEPLOYMENT_URL:-http://localhost:${ATS_PORT_CONVEX:-10110}}
+    depends_on:
+      convexDB-backend:
+        condition: service_healthy
+
+  # ── Node.js API Server ──────────────────────────────────────────────────────
   server:
     build:
       context: .
@@ -7,9 +55,12 @@ services:
     ports:
       - "${ATS_PORT_SERVER:-10111}:3001"
     environment:
-      CONVEX_URL: ${CONVEX_URL}
+      CONVEX_URL: http://convexDB-backend:${ATS_PORT_CONVEX:-10110}
       PORT: "3001"
       PYTHON_RUNTIME_URL: http://runtime:8000
+    depends_on:
+      convexDB-backend:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 10s
@@ -17,6 +68,7 @@ services:
       retries: 5
       start_period: 10s
 
+  # ── Python Runtime ──────────────────────────────────────────────────────────
   runtime:
     build:
       context: .
@@ -41,13 +93,14 @@ services:
       retries: 5
       start_period: 10s
 
+  # ── Frontend (Docker prod build) ────────────────────────────────────────────
   web:
     profiles: [prod]
     build:
       context: .
       dockerfile: packages/web/Dockerfile
       args:
-        VITE_CONVEX_URL: ${CONVEX_URL}
+        VITE_CONVEX_URL: http://localhost:${ATS_PORT_CONVEX:-10110}
     container_name: aegis-web
     ports:
       - "${ATS_PORT_WEB:-10113}:5173"
