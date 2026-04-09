@@ -79,11 +79,12 @@ export const deleteByTournament = mutation({
 export const deleteByRun = mutation({
   args: { runId: v.id("runs") },
   handler: async (ctx, { runId }) => {
-    const all = await ctx.db.query("leaderboardEntries").collect();
-    for (const entry of all) {
-      if (entry.runId === runId) {
-        await ctx.db.delete(entry._id);
-      }
+    const entries = await ctx.db
+      .query("leaderboardEntries")
+      .withIndex("by_runId", (q) => q.eq("runId", runId))
+      .collect();
+    for (const entry of entries) {
+      await ctx.db.delete(entry._id);
     }
   },
 });

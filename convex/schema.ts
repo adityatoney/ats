@@ -200,7 +200,8 @@ export default defineSchema({
   })
     .index("by_pgId", ["pgId"])
     .index("by_tournamentId", ["tournamentId"])
-    .index("by_tournamentId_agentId", ["tournamentId", "agentId"]),
+    .index("by_tournamentId_agentId", ["tournamentId", "agentId"])
+    .index("by_runId", ["runId"]),
 
   leaderboardEntries: defineTable({
     pgId: v.string(),
@@ -221,5 +222,6 @@ export default defineSchema({
   })
     .index("by_pgId", ["pgId"])
     .index("by_tournamentId", ["tournamentId"])
-    .index("by_tournamentId_agentId", ["tournamentId", "agentId"]),
+    .index("by_tournamentId_agentId", ["tournamentId", "agentId"])
+    .index("by_runId", ["runId"]),
 });

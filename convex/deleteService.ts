@@ -1,117 +1,160 @@
-import { mutation } from "./_generated/server";
+import { mutation, internalMutation } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { v } from "convex/values";
 
-/**
- * Delete all child records of a run.
- * Mirrors packages/server/src/services/delete-service.ts deleteRunChildren
- */
-async function deleteRunChildren(ctx: any, runId: any) {
-  // Delete fills (via orders)
-  const runOrders = await ctx.db
-    .query("orders")
-    .withIndex("by_runId", (q: any) => q.eq("runId", runId))
-    .collect();
-  for (const order of runOrders) {
-    const orderFills = await ctx.db
-      .query("fills")
-      .withIndex("by_orderId", (q: any) => q.eq("orderId", order._id))
-      .collect();
-    for (const fill of orderFills) {
-      await ctx.db.delete(fill._id);
-    }
-  }
-
-  // Delete orders
-  for (const order of runOrders) {
-    await ctx.db.delete(order._id);
-  }
-
-  // Delete positions
-  const positions = await ctx.db
-    .query("positions")
-    .withIndex("by_runId_symbol", (q: any) => q.eq("runId", runId))
-    .collect();
-  for (const pos of positions) {
-    await ctx.db.delete(pos._id);
-  }
-
-  // Delete portfolio snapshots
-  const snapshots = await ctx.db
-    .query("portfolioSnapshots")
-    .withIndex("by_runId_barIndex", (q: any) => q.eq("runId", runId))
-    .collect();
-  for (const snap of snapshots) {
-    await ctx.db.delete(snap._id);
-  }
-
-  // Delete agent events
-  const events = await ctx.db
-    .query("agentEvents")
-    .withIndex("by_runId", (q: any) => q.eq("runId", runId))
-    .collect();
-  for (const event of events) {
-    await ctx.db.delete(event._id);
-  }
-
-  // Delete branches (where runId or parentRunId)
-  const branchesByRun = await ctx.db
-    .query("branches")
-    .withIndex("by_runId", (q: any) => q.eq("runId", runId))
-    .collect();
-  for (const branch of branchesByRun) {
-    await ctx.db.delete(branch._id);
-  }
-  const branchesByParent = await ctx.db
-    .query("branches")
-    .withIndex("by_parentRunId", (q: any) => q.eq("parentRunId", runId))
-    .collect();
-  for (const branch of branchesByParent) {
-    // May already be deleted if runId === parentRunId
-    const existing = await ctx.db.get(branch._id);
-    if (existing) await ctx.db.delete(branch._id);
-  }
-
-  // Delete checkpoints
-  const checkpoints = await ctx.db
-    .query("checkpoints")
-    .withIndex("by_runId_barIndex", (q: any) => q.eq("runId", runId))
-    .collect();
-  for (const cp of checkpoints) {
-    await ctx.db.delete(cp._id);
-  }
-
-  // Delete leaderboard entries referencing this run
-  const allLeaderboard = await ctx.db.query("leaderboardEntries").collect();
-  for (const entry of allLeaderboard) {
-    if (entry.runId === runId) {
-      await ctx.db.delete(entry._id);
-    }
-  }
-
-  // Nullify runId on tournament entries
-  const allTournamentEntries = await ctx.db.query("tournamentEntries").collect();
-  for (const entry of allTournamentEntries) {
-    if (entry.runId === runId) {
-      await ctx.db.patch(entry._id, { runId: undefined });
-    }
-  }
-}
+const BATCH_SIZE = 200;
 
 const TERMINAL_STATUSES = ["completed", "failed", "cancelled"];
 
+/**
+ * Ordered phases for deleting a run's children.
+ * Each phase targets one table+index combination.
+ * Fills are deleted before orders (FK dependency).
+ * "nullify" mode patches runId to undefined instead of deleting.
+ */
+const DELETE_PHASES: ReadonlyArray<{
+  table: string;
+  index: string;
+  field: string;
+  mode?: "nullify";
+}> = [
+  { table: "fills",              index: "by_runId",          field: "runId" },
+  { table: "orders",             index: "by_runId",          field: "runId" },
+  { table: "positions",          index: "by_runId_symbol",   field: "runId" },
+  { table: "portfolioSnapshots", index: "by_runId_barIndex", field: "runId" },
+  { table: "agentEvents",        index: "by_runId",          field: "runId" },
+  { table: "branches",           index: "by_runId",          field: "runId" },
+  { table: "branches",           index: "by_parentRunId",    field: "parentRunId" },
+  { table: "checkpoints",        index: "by_runId_barIndex", field: "runId" },
+  { table: "leaderboardEntries", index: "by_runId",          field: "runId" },
+  { table: "tournamentEntries",  index: "by_runId",          field: "runId", mode: "nullify" },
+];
+
+// ---------------------------------------------------------------------------
+// Internal: batched self-scheduling run deletion worker
+// ---------------------------------------------------------------------------
+export const deleteRunBatch = internalMutation({
+  args: {
+    runId: v.id("runs"),
+    phase: v.float64(),
+  },
+  handler: async (ctx, { runId, phase }) => {
+    const run = await ctx.db.get(runId);
+    if (!run || run.status !== "deleting") return;
+
+    // All phases done — delete the run document itself
+    if (phase >= DELETE_PHASES.length) {
+      await ctx.db.delete(runId);
+      return;
+    }
+
+    const p = DELETE_PHASES[phase];
+    const docs = await ctx.db
+      .query(p.table as any)
+      .withIndex(p.index, (q: any) => q.eq(p.field, runId))
+      .take(BATCH_SIZE);
+
+    if (docs.length === 0) {
+      // Phase complete, advance to next
+      await ctx.scheduler.runAfter(0, internal.deleteService.deleteRunBatch, {
+        runId,
+        phase: phase + 1,
+      });
+      return;
+    }
+
+    for (const doc of docs) {
+      if (p.mode === "nullify") {
+        await ctx.db.patch((doc as any)._id, { runId: undefined });
+      } else {
+        await ctx.db.delete((doc as any)._id);
+      }
+    }
+
+    // If we got a full batch there may be more rows — re-run same phase.
+    // Otherwise advance to the next phase.
+    await ctx.scheduler.runAfter(0, internal.deleteService.deleteRunBatch, {
+      runId,
+      phase: docs.length === BATCH_SIZE ? phase : phase + 1,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Public: kick off run deletion (thin entry point)
+// ---------------------------------------------------------------------------
 export const deleteRun = mutation({
   args: { id: v.id("runs") },
   handler: async (ctx, { id }) => {
     const run = await ctx.db.get(id);
     if (!run) throw new Error("Run not found");
+    if (run.status === "deleting") return; // Already in progress
     if (!TERMINAL_STATUSES.includes(run.status)) {
       throw new Error("Cannot delete a running or paused run. Cancel it first.");
     }
-    await deleteRunChildren(ctx, id);
-    await ctx.db.delete(id);
+    await ctx.db.patch(id, { status: "deleting" });
+    await ctx.scheduler.runAfter(0, internal.deleteService.deleteRunBatch, {
+      runId: id,
+      phase: 0,
+    });
   },
 });
 
+// ---------------------------------------------------------------------------
+// Internal: finalize agent deletion after all its runs are gone
+// ---------------------------------------------------------------------------
+export const deleteAgentFinalize = internalMutation({
+  args: { agentId: v.id("agents") },
+  handler: async (ctx, { agentId }) => {
+    const agent = await ctx.db.get(agentId);
+    if (!agent) return; // Already deleted
+
+    // Check if any runs still exist for this agent
+    const remaining = await ctx.db
+      .query("runs")
+      .withIndex("by_agentId", (q) => q.eq("agentId", agentId))
+      .take(1);
+    if (remaining.length > 0) {
+      // Runs still being deleted — check again in 1 second
+      await ctx.scheduler.runAfter(1000, internal.deleteService.deleteAgentFinalize, {
+        agentId,
+      });
+      return;
+    }
+
+    // Batched cleanup of agent-owned records
+    const souls = await ctx.db
+      .query("soulVersions")
+      .withIndex("by_agentId_version", (q) => q.eq("agentId", agentId))
+      .take(BATCH_SIZE);
+    for (const s of souls) {
+      await ctx.db.delete(s._id);
+    }
+    if (souls.length === BATCH_SIZE) {
+      await ctx.scheduler.runAfter(0, internal.deleteService.deleteAgentFinalize, { agentId });
+      return;
+    }
+
+    const strategies = await ctx.db
+      .query("strategyVersions")
+      .withIndex("by_agentId_version", (q) => q.eq("agentId", agentId))
+      .take(BATCH_SIZE);
+    for (const s of strategies) {
+      await ctx.db.delete(s._id);
+    }
+    if (strategies.length === BATCH_SIZE) {
+      await ctx.scheduler.runAfter(0, internal.deleteService.deleteAgentFinalize, { agentId });
+      return;
+    }
+
+    // Everything cleaned up — delete the agent
+    await ctx.db.delete(agentId);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Public: kick off agent deletion
+// ---------------------------------------------------------------------------
 export const deleteAgent = mutation({
   args: { id: v.id("agents") },
   handler: async (ctx, { id }) => {
@@ -122,50 +165,34 @@ export const deleteAgent = mutation({
       .query("runs")
       .withIndex("by_agentId", (q) => q.eq("agentId", id))
       .collect();
-    const activeRuns = agentRuns.filter((r) => !TERMINAL_STATUSES.includes(r.status));
+    const activeRuns = agentRuns.filter(
+      (r) => !TERMINAL_STATUSES.includes(r.status) && r.status !== "deleting",
+    );
     if (activeRuns.length > 0) {
       throw new Error("Cannot delete agent with active runs. Cancel them first.");
     }
 
-    // Delete tournament entries and leaderboard entries for this agent
-    const allTE = await ctx.db.query("tournamentEntries").collect();
-    for (const entry of allTE) {
-      if (entry.agentId === id) await ctx.db.delete(entry._id);
-    }
-    const allLE = await ctx.db.query("leaderboardEntries").collect();
-    for (const entry of allLE) {
-      if (entry.agentId === id) await ctx.db.delete(entry._id);
-    }
-
-    // Delete all runs and their children
+    // Mark all terminal runs as deleting and kick off their deletion
     for (const run of agentRuns) {
-      await deleteRunChildren(ctx, run._id);
-      await ctx.db.delete(run._id);
+      if (run.status !== "deleting") {
+        await ctx.db.patch(run._id, { status: "deleting" });
+      }
+      await ctx.scheduler.runAfter(0, internal.deleteService.deleteRunBatch, {
+        runId: run._id,
+        phase: 0,
+      });
     }
 
-    // Delete soul versions
-    const souls = await ctx.db
-      .query("soulVersions")
-      .withIndex("by_agentId_version", (q) => q.eq("agentId", id))
-      .collect();
-    for (const soul of souls) {
-      await ctx.db.delete(soul._id);
-    }
-
-    // Delete strategy versions
-    const strategies = await ctx.db
-      .query("strategyVersions")
-      .withIndex("by_agentId_version", (q) => q.eq("agentId", id))
-      .collect();
-    for (const sv of strategies) {
-      await ctx.db.delete(sv._id);
-    }
-
-    // Delete the agent
-    await ctx.db.delete(id);
+    // Schedule agent cleanup after all runs are deleted
+    await ctx.scheduler.runAfter(0, internal.deleteService.deleteAgentFinalize, {
+      agentId: id,
+    });
   },
 });
 
+// ---------------------------------------------------------------------------
+// Public: delete tournament (kept synchronous — indexed queries, small data)
+// ---------------------------------------------------------------------------
 export const deleteTournament = mutation({
   args: { id: v.id("tournaments") },
   handler: async (ctx, { id }) => {

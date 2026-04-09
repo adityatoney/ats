@@ -331,7 +331,13 @@ export function RunDetailPage() {
               className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-gray-500'}`}
             />
             <RunControls status={status} runId={id!} onAction={refetch} />
-            {['completed', 'failed', 'cancelled'].includes(status) && (
+            {status === 'deleting' && (
+              <span className="px-3 py-1 bg-red-900 text-red-300 rounded text-sm flex items-center gap-2">
+                <span className="w-3 h-3 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
+                Deleting...
+              </span>
+            )}
+            {['completed', 'failed', 'cancelled'].includes(status) && status !== 'deleting' && (
               <button
                 onClick={() => setShowDeleteConfirm(true)}
                 className="px-3 py-1 bg-red-600 text-white rounded text-sm hover:bg-red-700"
