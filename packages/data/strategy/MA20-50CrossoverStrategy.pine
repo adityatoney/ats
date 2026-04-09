@@ -1,5 +1,5 @@
 //@version=5
-strategy("MA Crossover - AegisTrader",
+strategy("MA Crossover SMA 20/50",
      overlay=true,
      initial_capital=100000,
      default_qty_type=strategy.percent_of_equity,
